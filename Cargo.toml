@@ -1,0 +1,14 @@
+[package]
+name = "gh-mcp-router"
+version = "0.1.0"
+edition = "2021"
+description = "A local-first identity and routing layer for the official GitHub MCP Server"
+license = "MIT"
+
+[lib]
+name = "gh_mcp_router"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gh-mcp-router"
+path = "src/main.rs"

@@ -316,10 +316,26 @@ gh-mcp-router profiles
 gh-mcp-router route <owner/repo>
 gh-mcp-router explain <owner/repo>
 gh-mcp-router doctor
+gh-mcp-router validate --config PATH
 gh-mcp-router serve
 ```
 
-These commands are part of the v0.1 roadmap and are not available yet.
+## Configuration
+
+The default configuration is `$XDG_CONFIG_HOME/gh-mcp-router/config.yaml` on
+Unix-like systems, or `~/.config/gh-mcp-router/config.yaml` when
+`XDG_CONFIG_HOME` is not set. Windows uses `%APPDATA%/gh-mcp-router/config.yaml`.
+Use `--config PATH` to select another YAML or JSON file.
+
+The complete v0.1 schema is checked in at
+[`examples/config.example.yaml`](examples/config.example.yaml). It supports
+named credential references, optional per-profile `GH_CONFIG_DIR` and host
+isolation, ordered exact/glob repository, owner, and host routes, a default
+profile, and separate read/write ambiguity policies. Unknown fields are
+rejected, including token/PAT fields.
+
+The remaining commands are part of the v0.1 roadmap and are not available yet;
+`validate` is available now for checking configuration files.
 
 ### `init`
 

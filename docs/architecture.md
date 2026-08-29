@@ -30,15 +30,15 @@ Official GitHub MCP Server
 GitHub
 ```
 
-The current crate establishes these boundaries only. Discovery, routing
-evaluation, credential providers, upstream sessions, and MCP forwarding are
-planned work in later features.
+The configuration boundary now parses and validates profiles and ordered route
+rules before later services start. Discovery, routing evaluation, credential
+providers, upstream sessions, and MCP forwarding remain separate concerns.
 
 ## Module responsibilities
 
 | Module | Responsibility | Explicit non-responsibilities |
 | --- | --- | --- |
-| `config` | Profile and route-rule models | Configuration-file parsing |
+| `config` | Serializable profile/route models, parsing, path expansion, and validation | Credential retrieval or routing evaluation |
 | `context` | Normalized repository identity | Git remote or MCP root discovery |
 | `routing` | Pure routing decision domain | Credential retrieval, API calls, CLI state |
 | `credentials` | Credential references and provider interface | GitHub CLI discovery or token retrieval |
@@ -77,15 +77,15 @@ capabilities rather than duplicate their definitions.
 - Ambiguous write operations will eventually fail closed rather than guess an
   identity.
 
-These are design principles. The behavior marked as planned will be added by
-the feature that owns it; this foundation does not perform credential
-discovery, repository inference, routing evaluation, or MCP proxying.
+These are design principles. This feature validates configuration and expands
+safe path references, but does not perform credential discovery, repository
+inference, routing evaluation, or MCP proxying.
 
 ## Planned feature ownership
 
 The next features add behavior behind the boundaries established here:
 
-- configuration parsing (`#3`)
+- configuration parsing and validation (`#3`, implemented)
 - GitHub CLI credential discovery (`#4`)
 - deterministic routing evaluation (`#5`)
 - repository context discovery and safe write policy (`#6`)

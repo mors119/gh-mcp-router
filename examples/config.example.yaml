@@ -1,0 +1,50 @@
+# gh-mcp-router v0.1 configuration.
+# This file contains identity references only; never add a PAT or token here.
+
+profiles:
+  personal:
+    provider: gh
+    user: mors119
+    host: github.com
+
+  work:
+    provider: gh
+    user: work-account
+    gh_config_dir: ~/.config/gh-work
+    host: github.com
+
+  enterprise:
+    provider: gh
+    user: enterprise-account
+    gh_config_dir: ${HOME}/.config/gh-enterprise
+    host: github.example.com
+
+# Rules are evaluated in order; the first matching rule wins.
+routes:
+  - match:
+      repo: ExampleOrg/security-*
+    profile: work
+
+  - match:
+      repo: ExampleOrg/platform
+    profile: work
+
+  - match:
+      owner: ExampleOrg
+    profile: work
+
+  - match:
+      host: github.example.com
+    profile: enterprise
+
+  - match:
+      owner: mors119
+    profile: personal
+
+default_profile: personal
+
+# Reads may use default_profile when no route matches; writes always fail
+# closed unless a route selects a profile.
+ambiguity_policy:
+  read: default_profile
+  write: error

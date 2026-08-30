@@ -959,10 +959,8 @@ mod tests {
             &expected_id
         )
         .unwrap());
-        assert!(response_matches_id(
-            r#"{"jsonrpc":"2.0","id":7,"result":{}}"#,
-            &expected_id
-        )
-        .unwrap());
+        assert!(
+            response_matches_id(r#"{"jsonrpc":"2.0","id":7,"result":{}}"#, &expected_id).unwrap()
+        );
     }
 }

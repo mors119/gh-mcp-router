@@ -80,6 +80,12 @@ jobs:
   audit:
     name: Dependency advisory audit
     runs-on: ubuntu-latest
+    # audit-check publishes a richer commit check when this permission is
+    # available. Fork pull requests receive a read-only token from GitHub; the
+    # action falls back to the job log for those events.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

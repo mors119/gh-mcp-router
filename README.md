@@ -269,7 +269,11 @@ It should only be split into multiple crates when real architectural boundaries 
 
 ## Profile-isolated upstream sessions
 
-The preferred v0.1 local architecture is one isolated official GitHub MCP session per credential profile.
+The v0.1 local architecture uses one isolated official GitHub MCP stdio
+session per credential profile. The router starts sessions lazily and caches a
+healthy session for reuse. The default executable is `github-mcp-server stdio`;
+an explicit executable path or startup arguments can be supplied by the caller,
+and a missing executable is reported clearly rather than downloaded.
 
 ```text
                        ┌─────────────────────┐
@@ -288,6 +292,17 @@ MCP Client → Router -----+
 ```
 
 A session created for one profile must never be reused for another profile.
+Each session is permanently bound to its profile's non-secret credential
+reference. The resolved credential is passed only as
+`GITHUB_PERSONAL_ACCESS_TOKEN` in that child process's environment, alongside
+profile-specific host/config values when configured. It is never put in
+arguments or the router's global environment. Failed sessions are discarded
+without retrying the request and restarted on the next request; shutdown closes
+and terminates all child sessions.
+
+The upstream boundary forwards newline-delimited messages and does not define
+GitHub tools itself. Client-facing routing and MCP tool-surface preservation
+are handled by the follow-up MCP routing feature.
 
 HTTP upstream routing with request-scoped authorization may be explored later where appropriate, but it is not required for the first implementation.
 

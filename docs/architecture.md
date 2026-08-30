@@ -65,8 +65,11 @@ The router intentionally does **not** implement or replace the following:
 - a replacement GitHub MCP toolset
 
 Those capabilities remain responsibilities of the official GitHub MCP Server.
-The upstream process/session boundary will forward or isolate those
-capabilities rather than duplicate their definitions.
+The upstream process/session boundary forwards or isolates those capabilities
+rather than duplicate their definitions. It maintains one lazily started stdio
+child per profile, binds each child permanently to its credential reference,
+passes the resolved credential only in the child environment, and restarts a
+failed child on the next request without retrying the failed message.
 
 ## Security principles
 
@@ -86,8 +89,10 @@ capabilities rather than duplicate their definitions.
 
 These are design principles. The GitHub CLI provider performs account discovery
 and on-demand token retrieval through explicit subprocess arguments and
-profile-specific `GH_CONFIG_DIR` values. Repository inference, routing
-evaluation, and MCP proxying remain separate concerns.
+profile-specific `GH_CONFIG_DIR` values. The upstream launcher uses the
+configured `github-mcp-server` executable or PATH lookup and never inherits
+upstream stderr. Repository inference, routing evaluation, and MCP proxying
+remain separate concerns.
 
 ## Planned feature ownership
 
@@ -97,7 +102,7 @@ The next features add behavior behind the boundaries established here:
 - GitHub CLI credential discovery (`#4`)
 - deterministic routing evaluation (`#5`, implemented)
 - repository context discovery and safe write policy (`#6`, implemented)
-- profile-isolated upstream sessions (`#7`)
+- profile-isolated upstream sessions (`#7`, implemented)
 - MCP request forwarding (`#8`)
 - complete CLI workflows (`#9`)
 - deeper secret, concurrency, logging, and process hardening (`#10`)

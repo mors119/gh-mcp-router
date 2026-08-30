@@ -40,8 +40,8 @@ remain separate concerns.
 | Module | Responsibility | Explicit non-responsibilities |
 | --- | --- | --- |
 | `config` | Serializable profile/route models, parsing, path expansion, and validation | Credential retrieval or routing evaluation |
-| `context` | Normalized repository identity | Git remote or MCP root discovery |
-| `routing` | Pure routing decision domain | Credential retrieval, API calls, CLI state |
+| `context` | Request-scoped repository resolution, normalization, and source metadata | Credential retrieval, routing policy, GitHub API calls |
+| `routing` | Pure routing decisions, operation classification, and safe fallback policy | Credential retrieval, API calls, CLI state |
 | `credentials` | Credential references, GitHub CLI account discovery, and token retrieval | Repository/profile routing or GitHub API calls |
 | `security` | Secret-safe formatting and `SecretString` cleanup | Full lifecycle hardening beyond value cleanup |
 | `mcp` | Client-facing protocol/proxy boundary | Repository routing policy |
@@ -76,8 +76,13 @@ capabilities rather than duplicate their definitions.
 - Credential retrieval and routing decisions remain separate concerns.
 - Ordinary `Debug` and `Display` formatting of secret values must redact them;
   subprocess output is never included in provider errors.
-- Ambiguous write operations will eventually fail closed rather than guess an
-  identity.
+- Ambiguous write operations fail closed rather than guess an identity.
+- Repository context prefers explicit tool arguments, then repository URLs,
+  request-scoped MCP/workspace roots, read-only Git remotes, and finally an
+  explicit configured context.
+- Default-profile fallback is allowed for reads by default, while write
+  fallback requires `ambiguity_policy.write: default_profile`; unknown tools
+  never use a default fallback.
 
 These are design principles. The GitHub CLI provider performs account discovery
 and on-demand token retrieval through explicit subprocess arguments and
@@ -91,7 +96,7 @@ The next features add behavior behind the boundaries established here:
 - configuration parsing and validation (`#3`, implemented)
 - GitHub CLI credential discovery (`#4`)
 - deterministic routing evaluation (`#5`, implemented)
-- repository context discovery and safe write policy (`#6`)
+- repository context discovery and safe write policy (`#6`, implemented)
 - profile-isolated upstream sessions (`#7`)
 - MCP request forwarding (`#8`)
 - complete CLI workflows (`#9`)

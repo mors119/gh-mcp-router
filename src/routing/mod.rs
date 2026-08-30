@@ -19,6 +19,83 @@ pub enum OperationClass {
     Read,
     /// An operation that may change GitHub state.
     Write,
+    /// An operation whose safety cannot be established from maintained
+    /// upstream metadata.
+    Unknown,
+}
+
+impl fmt::Display for OperationClass {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Unknown => "unknown",
+        })
+    }
+}
+
+impl OperationClass {
+    /// Classify only names in maintained allowlists. New upstream tools remain
+    /// conservative until explicitly reviewed.
+    pub fn from_tool_name(name: &str) -> Self {
+        match name {
+            "get_file_contents"
+            | "get_repository"
+            | "get_issue"
+            | "list_issues"
+            | "search_issues"
+            | "get_pull_request"
+            | "list_pull_requests"
+            | "search_pull_requests"
+            | "search_code"
+            | "search_repositories"
+            | "get_commit"
+            | "list_commits"
+            | "list_branches"
+            | "list_tags"
+            | "get_release_by_tag"
+            | "list_releases"
+            | "get_workflow_run"
+            | "list_workflow_runs"
+            | "get_job_logs"
+            | "get_me"
+            | "get_project"
+            | "list_projects"
+            | "list_labels"
+            | "get_discussion"
+            | "list_discussions" => Self::Read,
+            "create_issue"
+            | "update_issue"
+            | "add_issue_comment"
+            | "create_pull_request"
+            | "update_pull_request"
+            | "merge_pull_request"
+            | "close_pull_request"
+            | "create_repository"
+            | "update_repository"
+            | "delete_repository"
+            | "create_or_update_file"
+            | "push_files"
+            | "delete_file"
+            | "create_branch"
+            | "delete_branch"
+            | "create_release"
+            | "update_release"
+            | "delete_release"
+            | "rerun_workflow"
+            | "cancel_workflow_run"
+            | "create_fork"
+            | "add_assignees"
+            | "remove_assignees"
+            | "add_labels"
+            | "remove_labels"
+            | "lock_issue"
+            | "unlock_issue"
+            | "update_pull_request_branch"
+            | "request_copilot_review" => Self::Write,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 /// Specificity used to compare otherwise matching route rules.
@@ -96,6 +173,66 @@ pub enum RoutingResult {
     NoMatch(NoMatch),
     Ambiguous(AmbiguousRouting),
 }
+
+/// A route selected after applying operation-specific safety policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SafeRoutingDecision {
+    pub operation: OperationClass,
+    pub context: RepositoryContext,
+    pub routing: RoutingDecision,
+}
+
+/// Failure to safely associate an operation with one identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SafeRoutingError {
+    MissingRepositoryContext {
+        operation: OperationClass,
+    },
+    NoMatch {
+        operation: OperationClass,
+        repository: String,
+    },
+    Ambiguous {
+        operation: OperationClass,
+        route: AmbiguousRouting,
+    },
+    FallbackNotAllowed {
+        operation: OperationClass,
+        repository: String,
+    },
+}
+
+impl fmt::Display for SafeRoutingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingRepositoryContext { operation } => write!(
+                formatter,
+                "Cannot safely select a GitHub identity for this {operation} operation. Repository context is missing or ambiguous. Provide owner/repository or configure a matching route."
+            ),
+            Self::NoMatch {
+                operation,
+                repository,
+            } => write!(
+                formatter,
+                "Cannot safely select a GitHub identity for this {operation} operation. No route matches {repository}; provide a matching route."
+            ),
+            Self::Ambiguous { operation, route } => write!(
+                formatter,
+                "Cannot safely select a GitHub identity for this {operation} operation. Routing for {} is ambiguous at {} specificity; configure one matching profile.",
+                route.repository, route.specificity
+            ),
+            Self::FallbackNotAllowed {
+                operation,
+                repository,
+            } => write!(
+                formatter,
+                "Cannot safely select a GitHub identity for this {operation} operation. The route for {repository} relies on a default profile, which is not permitted by the configured safety policy."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SafeRoutingError {}
 
 impl RoutingResult {
     pub fn selected_profile(&self) -> Option<&str> {
@@ -202,6 +339,59 @@ pub fn evaluate(config: &Config, context: &RepositoryContext) -> RoutingResult {
 /// Alias emphasizing that this function performs no external work.
 pub fn route(config: &Config, context: &RepositoryContext) -> RoutingResult {
     evaluate(config, context)
+}
+
+/// Apply routing and the conservative read/write/unknown fallback policy.
+///
+/// An explicit matching rule is sufficient for a known operation. A default
+/// profile is usable only when the corresponding policy explicitly permits it;
+/// unknown operations never use a default fallback. Ambiguous routes always
+/// fail closed.
+pub fn route_safely(
+    config: &Config,
+    context: Option<&RepositoryContext>,
+    operation: OperationClass,
+) -> Result<SafeRoutingDecision, SafeRoutingError> {
+    let context = context.ok_or(SafeRoutingError::MissingRepositoryContext { operation })?;
+    let result = evaluate(config, context);
+    let routing = match result {
+        RoutingResult::Selected(decision) => {
+            if decision.fallback_used && !fallback_allowed(config, operation) {
+                return Err(SafeRoutingError::FallbackNotAllowed {
+                    operation,
+                    repository: decision.repository,
+                });
+            }
+            decision
+        }
+        RoutingResult::NoMatch(no_match) => {
+            return Err(SafeRoutingError::NoMatch {
+                operation,
+                repository: no_match.repository,
+            })
+        }
+        RoutingResult::Ambiguous(route) => {
+            return Err(SafeRoutingError::Ambiguous { operation, route })
+        }
+    };
+
+    Ok(SafeRoutingDecision {
+        operation,
+        context: context.clone(),
+        routing,
+    })
+}
+
+fn fallback_allowed(config: &Config, operation: OperationClass) -> bool {
+    match operation {
+        OperationClass::Read => {
+            config.ambiguity_policy.read == crate::config::AmbiguityPolicy::DefaultProfile
+        }
+        OperationClass::Write => {
+            config.ambiguity_policy.write == crate::config::AmbiguityPolicy::DefaultProfile
+        }
+        OperationClass::Unknown => false,
+    }
 }
 
 fn repository_name(context: &RepositoryContext) -> String {
@@ -538,5 +728,111 @@ mod tests {
         let formatted = format!("{result:?}");
         assert!(!formatted.contains("ghp_"));
         assert!(!formatted.contains("github_pat_"));
+    }
+
+    #[test]
+    fn safe_routing_allows_explicit_write_route() {
+        let config = config(
+            vec![rule("work", Some("ExampleOrg/repo"), None, None)],
+            Some("personal"),
+        );
+        let decision = route_safely(
+            &config,
+            Some(&context("github.com", "ExampleOrg", "repo")),
+            OperationClass::Write,
+        )
+        .unwrap();
+        assert_eq!(decision.routing.selected_profile, "work");
+        assert!(!decision.routing.fallback_used);
+    }
+
+    #[test]
+    fn safe_routing_rejects_unmatched_write_and_ambiguous_write() {
+        let no_route = config(Vec::new(), Some("personal"));
+        let error = route_safely(
+            &no_route,
+            Some(&context("github.com", "ExampleOrg", "repo")),
+            OperationClass::Write,
+        )
+        .unwrap_err();
+        assert!(matches!(error, SafeRoutingError::FallbackNotAllowed { .. }));
+
+        let ambiguous = config(
+            vec![
+                rule("personal", Some("ExampleOrg/repo"), None, None),
+                rule("work", Some("ExampleOrg/repo"), None, None),
+            ],
+            None,
+        );
+        let error = route_safely(
+            &ambiguous,
+            Some(&context("github.com", "ExampleOrg", "repo")),
+            OperationClass::Write,
+        )
+        .unwrap_err();
+        assert!(matches!(error, SafeRoutingError::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn safe_routing_allows_explicit_read_fallback_and_marks_it() {
+        let config = config(Vec::new(), Some("personal"));
+        let decision = route_safely(
+            &config,
+            Some(&context("github.com", "ExampleOrg", "repo")),
+            OperationClass::Read,
+        )
+        .unwrap();
+        assert_eq!(decision.routing.selected_profile, "personal");
+        assert!(decision.routing.fallback_used);
+    }
+
+    #[test]
+    fn write_fallback_requires_and_honors_explicit_policy() {
+        let mut config = config(Vec::new(), Some("personal"));
+        config.ambiguity_policy.write = crate::config::AmbiguityPolicy::DefaultProfile;
+        let decision = route_safely(
+            &config,
+            Some(&context("github.com", "ExampleOrg", "repo")),
+            OperationClass::Write,
+        )
+        .unwrap();
+        assert_eq!(decision.routing.selected_profile, "personal");
+        assert!(decision.routing.fallback_used);
+    }
+
+    #[test]
+    fn unknown_operations_never_use_default_fallback() {
+        let config = config(Vec::new(), Some("personal"));
+        let error = route_safely(
+            &config,
+            Some(&context("github.com", "ExampleOrg", "repo")),
+            OperationClass::Unknown,
+        )
+        .unwrap_err();
+        assert!(matches!(error, SafeRoutingError::FallbackNotAllowed { .. }));
+    }
+
+    #[test]
+    fn operation_classification_is_allowlist_based() {
+        assert_eq!(
+            OperationClass::from_tool_name("get_repository"),
+            OperationClass::Read
+        );
+        assert_eq!(
+            OperationClass::from_tool_name("create_issue"),
+            OperationClass::Write
+        );
+        assert_eq!(
+            OperationClass::from_tool_name("future_tool_with_update_in_name"),
+            OperationClass::Unknown
+        );
+    }
+
+    #[test]
+    fn missing_context_is_an_actionable_safe_routing_error() {
+        let error =
+            route_safely(&config(Vec::new(), None), None, OperationClass::Write).unwrap_err();
+        assert!(error.to_string().contains("owner/repository"));
+        assert!(!error.to_string().contains("ghp_"));
     }
 }

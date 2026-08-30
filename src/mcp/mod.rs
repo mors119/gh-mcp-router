@@ -240,13 +240,27 @@ where
 
     /// Run the client-facing newline-delimited stdio server. Requests are
     /// handled on separate workers, while response writes remain serialized.
+    /// MCP lifecycle messages act as stream-order barriers so a notification
+    /// such as `notifications/initialized` is committed before a following
+    /// request is dispatched.
     pub fn serve_stdio(self: Arc<Self>) -> Result<(), McpError> {
         let stdin = io::stdin();
-        let output = Arc::new(Mutex::new(io::BufWriter::new(io::stdout())));
+        self.serve_reader(stdin.lock(), io::BufWriter::new(io::stdout()))
+    }
+
+    fn serve_reader<R, W>(self: Arc<Self>, reader: R, writer: W) -> Result<(), McpError>
+    where
+        R: BufRead,
+        W: Write + Send + 'static,
+    {
+        let output = Arc::new(Mutex::new(writer));
         let mut workers = Vec::new();
 
-        for line in stdin.lock().lines() {
+        for line in reader.lines() {
             let line = line.map_err(McpError::Io)?;
+            if preserves_stream_order(&line) {
+                join_workers(&mut workers)?;
+            }
             let router = Arc::clone(&self);
             let output = Arc::clone(&output);
             workers.push(thread::spawn(move || {
@@ -262,11 +276,7 @@ where
                 }
             }));
         }
-        for worker in workers {
-            worker
-                .join()
-                .map_err(|_| McpError::Io(io::Error::other("MCP request worker panicked")))??;
-        }
+        join_workers(&mut workers)?;
         self.shutdown();
         Ok(())
     }
@@ -758,6 +768,32 @@ fn single_roots_response_path(result: &Value) -> Option<PathBuf> {
     single_roots_path(roots)
 }
 
+fn preserves_stream_order(line: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    match value.get("method").and_then(Value::as_str) {
+        Some("initialize")
+        | Some("notifications/initialized")
+        | Some("tools/list")
+        | Some("shutdown")
+        | Some("exit") => true,
+        None => value.get("id").is_some(),
+        _ => false,
+    }
+}
+
+fn join_workers(
+    workers: &mut Vec<thread::JoinHandle<Result<(), McpError>>>,
+) -> Result<(), McpError> {
+    for worker in workers.drain(..) {
+        worker
+            .join()
+            .map_err(|_| McpError::Io(io::Error::other("MCP request worker panicked")))??;
+    }
+    Ok(())
+}
+
 fn single_roots_path(roots: &[Value]) -> Option<PathBuf> {
     if roots.len() != 1 {
         return None;
@@ -791,6 +827,7 @@ fn error_response(id: Option<Value>, code: i64, message: impl Into<String>) -> S
 mod tests {
     use std::{
         collections::HashMap,
+        io::{self, Cursor, Write},
         sync::{Arc, Mutex},
         thread,
     };
@@ -807,6 +844,20 @@ mod tests {
     };
 
     type Messages = Arc<Mutex<Vec<(String, Value)>>>;
+
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[derive(Clone)]
     struct Credentials(Arc<HashMap<String, String>>);
@@ -980,6 +1031,30 @@ mod tests {
         assert!(router
             .handle_message(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
             .is_none());
+    }
+
+    #[test]
+    fn stdio_lifecycle_messages_are_processed_in_stream_order() {
+        let (router, _messages) = router(false);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let input = Cursor::new(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n".to_vec(),
+        );
+
+        Arc::new(router)
+            .serve_reader(input, SharedWriter(Arc::clone(&output)))
+            .unwrap();
+
+        let responses = String::from_utf8(output.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 1);
+        assert!(responses[0]["result"].is_object());
+        assert_eq!(responses[1]["id"], 2);
+        assert!(responses[1]["result"]["tools"].is_array());
     }
 
     #[test]

@@ -6,8 +6,32 @@ Route GitHub MCP requests to the right GitHub identity automatically.
 
 It is designed for developers who work across multiple GitHub identities — personal accounts, work accounts, organizations, client accounts, bot accounts, or permission-scoped credentials — but want to expose **one GitHub MCP tool surface** to their AI tools.
 
-> Project status: early development.
-> The v0.1 architecture and roadmap are defined, but the router is not yet ready for production use.
+> Project status: pre-release v0.1 development.
+> The local router, CLI, and stdio MCP path are implemented on `main`, but no
+> crates.io package or downloadable release binary is published yet. Treat the
+> current build as a development release, not a production security boundary.
+
+## Quick start
+
+The supported installation path today is building from this repository. Start
+with the [installation guide](docs/installation.md), then follow the
+[configuration guide](docs/configuration.md) to create two identity-only
+profiles and route repositories to them.
+
+```bash
+cargo build --release
+gh auth status
+gh-mcp-router init --config ~/.config/gh-mcp-router/config.yaml
+gh-mcp-router profiles --config ~/.config/gh-mcp-router/config.yaml
+gh-mcp-router route ExampleOrg/backend --config ~/.config/gh-mcp-router/config.yaml
+gh-mcp-router doctor --config ~/.config/gh-mcp-router/config.yaml
+```
+
+The generated configuration contains account references and routing metadata,
+never tokens. Before connecting a client, read the
+[MCP client integration guide](docs/mcp-client-integration.md). The
+[troubleshooting guide](docs/troubleshooting.md) covers the common setup and
+upstream failures.
 
 Credential-free unit and multi-profile integration tests are documented in
 [`docs/testing.md`](docs/testing.md). Live GitHub testing is opt-in and
@@ -96,7 +120,7 @@ should use the appropriate identities automatically.
 
 Routing is based on repository context.
 
-Planned matching levels are:
+Matching levels are:
 
 ```text
 exact repository
@@ -248,7 +272,7 @@ gh-mcp-router
 
 GitHub behavior remains owned by the official GitHub MCP Server.
 
-## Planned v0.1 architecture
+## v0.1 architecture
 
 The initial implementation is being developed in Rust.
 
@@ -267,7 +291,7 @@ src/
 └── security/
 ```
 
-The project will begin as a single crate.
+The project remains a single crate.
 
 It should only be split into multiple crates when real architectural boundaries justify the additional complexity.
 
@@ -330,8 +354,8 @@ discovery, then consumes the client's `initialized` notification. Cancellation,
 shutdown, and exit lifecycle messages are handled without exposing credentials.
 
 The proxy can be used as a library through `McpRouter::handle_message` or its
-newline-delimited `serve_stdio` entry point. The command-line `serve` wiring
-remains part of the later CLI workflow feature.
+newline-delimited `serve_stdio` entry point. The command-line `serve` command
+starts this same client-facing transport.
 
 HTTP upstream routing with request-scoped authorization may be explored later where appropriate, but it is not required for the first implementation.
 
@@ -339,9 +363,9 @@ HTTP upstream routing with request-scoped authorization may be explored later wh
 
 Not every MCP call represents a repository in exactly the same way.
 
-The router will attempt to normalize repository context from the most explicit available source.
+The router normalizes repository context from the most explicit available source.
 
-Planned priority:
+Resolution priority:
 
 ```text
 explicit owner + repo
@@ -377,7 +401,7 @@ ambiguous result.
 
 ## CLI
 
-The v0.1 CLI is expected to provide:
+The v0.1 CLI provides:
 
 ```bash
 gh-mcp-router init
@@ -527,11 +551,13 @@ github-mcp-server executable, credential availability, and upstream process
 startup. Diagnostic failures use non-zero exit codes and never include token
 values.
 
-For an MCP client, configure one stdio server command:
+For an MCP client, configure one stdio server command. The exact client file
+format is documented in [MCP client integration](docs/mcp-client-integration.md):
 
     {
       "mcpServers": {
         "github": {
+          "type": "stdio",
           "command": "gh-mcp-router",
           "args": ["serve", "--config", "/absolute/path/to/config.yaml"]
         }

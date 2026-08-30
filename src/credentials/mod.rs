@@ -18,7 +18,7 @@ use serde::Deserialize;
 use zeroize::Zeroize;
 
 use crate::config::expand_path;
-use crate::security::SecretString;
+use crate::security::{apply_minimal_child_environment, CancellationToken, SecretString};
 
 /// The host used when a credential reference does not specify one.
 pub const DEFAULT_GITHUB_HOST: &str = "github.com";
@@ -98,6 +98,8 @@ pub enum CredentialErrorKind {
     MalformedOutput,
     /// The GitHub CLI did not finish within the configured timeout.
     Timeout,
+    /// The request was cancelled while the command was running.
+    Cancelled,
     /// The GitHub CLI returned a failure status.
     CommandFailed,
 }
@@ -141,6 +143,7 @@ impl fmt::Display for CredentialError {
                 "the GitHub CLI returned malformed authentication data"
             }
             CredentialErrorKind::Timeout => "the GitHub CLI command timed out",
+            CredentialErrorKind::Cancelled => "the GitHub CLI command was cancelled",
             CredentialErrorKind::CommandFailed => "the GitHub CLI command failed",
         };
 
@@ -159,6 +162,31 @@ impl std::error::Error for CredentialError {}
 pub trait CredentialProvider {
     /// Resolve a reference without changing global authentication state.
     fn resolve(&self, reference: &CredentialRef) -> Result<SecretString, CredentialError>;
+
+    /// Resolve with cooperative cancellation. Providers with interruptible
+    /// I/O can override this; the default prevents cancelled work from being
+    /// accepted after a non-interruptible provider returns.
+    fn resolve_with_cancellation(
+        &self,
+        reference: &CredentialRef,
+        cancellation: &CancellationToken,
+    ) -> Result<SecretString, CredentialError> {
+        if cancellation.is_cancelled() {
+            return Err(CredentialError::new(
+                reference.clone(),
+                CredentialErrorKind::Cancelled,
+            ));
+        }
+        let result = self.resolve(reference);
+        if cancellation.is_cancelled() {
+            Err(CredentialError::new(
+                reference.clone(),
+                CredentialErrorKind::Cancelled,
+            ))
+        } else {
+            result
+        }
+    }
 }
 
 /// The source of a discovered authenticated account.
@@ -284,12 +312,29 @@ pub enum CommandRunnerError {
     NotFound,
     Io,
     Timeout,
+    Cancelled,
 }
 
 /// Injectable boundary for command execution. Tests use this instead of a
 /// contributor's real GitHub login.
 pub trait CommandRunner: Send + Sync {
     fn run(&self, request: CommandRequest) -> Result<CommandOutput, CommandRunnerError>;
+
+    fn run_with_cancellation(
+        &self,
+        request: CommandRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<CommandOutput, CommandRunnerError> {
+        if cancellation.is_cancelled() {
+            return Err(CommandRunnerError::Cancelled);
+        }
+        let result = self.run(request);
+        if cancellation.is_cancelled() {
+            Err(CommandRunnerError::Cancelled)
+        } else {
+            result
+        }
+    }
 }
 
 /// Real subprocess runner for the `gh` executable.
@@ -298,68 +343,102 @@ pub struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&self, request: CommandRequest) -> Result<CommandOutput, CommandRunnerError> {
-        let mut command = Command::new("gh");
-        command.args(&request.args);
-        if let Some(config_dir) = &request.gh_config_dir {
-            command.env("GH_CONFIG_DIR", config_dir);
-        }
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        let mut child = command.spawn().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                CommandRunnerError::NotFound
-            } else {
-                CommandRunnerError::Io
-            }
-        })?;
-
-        let mut stdout = child.stdout.take().ok_or(CommandRunnerError::Io)?;
-        let mut stderr = child.stderr.take().ok_or(CommandRunnerError::Io)?;
-        let stdout_reader = thread::spawn(move || {
-            let mut output = String::new();
-            let result = stdout.read_to_string(&mut output);
-            (result, output)
-        });
-        let stderr_reader = thread::spawn(move || {
-            let mut output = String::new();
-            let result = stderr.read_to_string(&mut output);
-            (result, output)
-        });
-
-        let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() >= request.timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = stdout_reader.join();
-                    let _ = stderr_reader.join();
-                    return Err(CommandRunnerError::Timeout);
-                }
-                Ok(None) => thread::sleep(Duration::from_millis(10)),
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = stdout_reader.join();
-                    let _ = stderr_reader.join();
-                    return Err(CommandRunnerError::Io);
-                }
-            }
-        };
-
-        let (stdout_result, stdout) = stdout_reader.join().map_err(|_| CommandRunnerError::Io)?;
-        let (stderr_result, stderr) = stderr_reader.join().map_err(|_| CommandRunnerError::Io)?;
-        if stdout_result.is_err() || stderr_result.is_err() {
-            return Err(CommandRunnerError::Io);
-        }
-
-        Ok(CommandOutput {
-            status: status.code(),
-            stdout,
-            stderr,
-        })
+        run_process(request, None)
     }
+
+    fn run_with_cancellation(
+        &self,
+        request: CommandRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<CommandOutput, CommandRunnerError> {
+        run_process(request, Some(cancellation))
+    }
+}
+
+fn run_process(
+    request: CommandRequest,
+    cancellation: Option<&CancellationToken>,
+) -> Result<CommandOutput, CommandRunnerError> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(CommandRunnerError::Cancelled);
+    }
+    let mut command = Command::new("gh");
+    command.args(&request.args);
+    apply_minimal_child_environment(&mut command);
+    if let Some(config_dir) = &request.gh_config_dir {
+        command.env("GH_CONFIG_DIR", config_dir);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CommandRunnerError::NotFound
+        } else {
+            CommandRunnerError::Io
+        }
+    })?;
+
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        CommandRunnerError::Io
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        CommandRunnerError::Io
+    })?;
+    let stdout_reader = thread::spawn(move || {
+        let mut output = String::new();
+        let result = stdout.read_to_string(&mut output);
+        (result, output)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut output = String::new();
+        let result = stderr.read_to_string(&mut output);
+        (result, output)
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(CommandRunnerError::Cancelled);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= request.timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(CommandRunnerError::Timeout);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(CommandRunnerError::Io);
+            }
+        }
+    };
+
+    let (stdout_result, stdout) = stdout_reader.join().map_err(|_| CommandRunnerError::Io)?;
+    let (stderr_result, stderr) = stderr_reader.join().map_err(|_| CommandRunnerError::Io)?;
+    if stdout_result.is_err() || stderr_result.is_err() {
+        return Err(CommandRunnerError::Io);
+    }
+
+    Ok(CommandOutput {
+        status: status.code(),
+        stdout,
+        stderr,
+    })
 }
 
 /// GitHub CLI credential provider with injectable process execution.
@@ -425,21 +504,35 @@ impl<R: CommandRunner> GhCliCredentialProvider<R> {
                 reference,
                 CredentialErrorKind::CommandFailed,
             )),
+            Err(CommandRunnerError::Cancelled) => Err(CredentialError::new(
+                reference,
+                CredentialErrorKind::Cancelled,
+            )),
         }
     }
 
     /// Discover all accounts known to `gh` for a profile's host and config.
     pub fn discover(&self, reference: &CredentialRef) -> Result<Vec<GhAccount>, CredentialError> {
+        self.discover_with_cancellation(reference, &CancellationToken::new())
+    }
+
+    pub fn discover_with_cancellation(
+        &self,
+        reference: &CredentialRef,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GhAccount>, CredentialError> {
         self.validate_reference(reference)?;
+        self.check_cancelled(reference, cancellation)?;
         let host = reference.host().unwrap_or(DEFAULT_GITHUB_HOST);
         let config_dir = self.config_dir(reference)?;
-        let output = self.run(
+        let output = self.run_with_cancellation(
             reference,
             CommandRequest::new(
                 ["auth", "status", "--hostname", host, "--json", "hosts"],
                 config_dir,
                 self.timeout,
             ),
+            cancellation,
         )?;
         if !output.is_success() {
             return Err(CredentialError::new(
@@ -456,9 +549,17 @@ impl<R: CommandRunner> GhCliCredentialProvider<R> {
     /// Verify that the exact configured account is authenticated without
     /// retrieving its token.
     pub fn verify_account(&self, reference: &CredentialRef) -> Result<GhAccount, CredentialError> {
+        self.verify_account_with_cancellation(reference, &CancellationToken::new())
+    }
+
+    pub fn verify_account_with_cancellation(
+        &self,
+        reference: &CredentialRef,
+        cancellation: &CancellationToken,
+    ) -> Result<GhAccount, CredentialError> {
         let host = reference.host().unwrap_or(DEFAULT_GITHUB_HOST);
         let account = self
-            .discover(reference)?
+            .discover_with_cancellation(reference, cancellation)?
             .into_iter()
             .find(|account| account.host == host && account.user == reference.name());
         match account {
@@ -476,10 +577,19 @@ impl<R: CommandRunner> GhCliCredentialProvider<R> {
         &self,
         reference: &CredentialRef,
     ) -> Result<SecretString, CredentialError> {
-        self.verify_account(reference)?;
+        self.resolve_reference_with_cancellation(reference, &CancellationToken::new())
+    }
+
+    pub fn resolve_reference_with_cancellation(
+        &self,
+        reference: &CredentialRef,
+        cancellation: &CancellationToken,
+    ) -> Result<SecretString, CredentialError> {
+        self.verify_account_with_cancellation(reference, cancellation)?;
+        self.check_cancelled(reference, cancellation)?;
         let host = reference.host().unwrap_or(DEFAULT_GITHUB_HOST);
 
-        let output = self.run(
+        let output = self.run_with_cancellation(
             reference,
             CommandRequest::new(
                 [
@@ -493,6 +603,7 @@ impl<R: CommandRunner> GhCliCredentialProvider<R> {
                 self.config_dir(reference)?,
                 self.timeout,
             ),
+            cancellation,
         )?;
         if !output.is_success() {
             return Err(CredentialError::new(
@@ -548,25 +659,52 @@ impl<R: CommandRunner> GhCliCredentialProvider<R> {
         Ok(Some(path))
     }
 
-    fn run(
+    fn run_with_cancellation(
         &self,
         reference: &CredentialRef,
         request: CommandRequest,
+        cancellation: &CancellationToken,
     ) -> Result<CommandOutput, CredentialError> {
-        self.runner.run(request).map_err(|error| {
-            let kind = match error {
-                CommandRunnerError::NotFound => CredentialErrorKind::GhNotInstalled,
-                CommandRunnerError::Timeout => CredentialErrorKind::Timeout,
-                CommandRunnerError::Io => CredentialErrorKind::CommandFailed,
-            };
-            CredentialError::new(reference.clone(), kind)
-        })
+        self.runner
+            .run_with_cancellation(request, cancellation)
+            .map_err(|error| {
+                let kind = match error {
+                    CommandRunnerError::NotFound => CredentialErrorKind::GhNotInstalled,
+                    CommandRunnerError::Timeout => CredentialErrorKind::Timeout,
+                    CommandRunnerError::Io => CredentialErrorKind::CommandFailed,
+                    CommandRunnerError::Cancelled => CredentialErrorKind::Cancelled,
+                };
+                CredentialError::new(reference.clone(), kind)
+            })
+    }
+
+    fn check_cancelled(
+        &self,
+        reference: &CredentialRef,
+        cancellation: &CancellationToken,
+    ) -> Result<(), CredentialError> {
+        if cancellation.is_cancelled() {
+            Err(CredentialError::new(
+                reference.clone(),
+                CredentialErrorKind::Cancelled,
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
 impl<R: CommandRunner> CredentialProvider for GhCliCredentialProvider<R> {
     fn resolve(&self, reference: &CredentialRef) -> Result<SecretString, CredentialError> {
         self.resolve_reference(reference)
+    }
+
+    fn resolve_with_cancellation(
+        &self,
+        reference: &CredentialRef,
+        cancellation: &CancellationToken,
+    ) -> Result<SecretString, CredentialError> {
+        self.resolve_reference_with_cancellation(reference, cancellation)
     }
 }
 

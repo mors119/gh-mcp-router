@@ -563,6 +563,35 @@ The router is intended to be a **local developer tool**.
 
 It is not designed as a public multi-tenant credential broker.
 
+### v0.1 trust and process boundaries
+
+The local user and configured MCP client are trusted. Profile credentials are
+retrieved locally through `gh`; the official GitHub MCP child process receives
+only the credential assigned to that profile. Router configuration contains
+identity and routing metadata, never raw PATs, OAuth tokens, or GitHub App
+private keys.
+
+Child environments are built from an explicit small allowlist of benign
+runtime variables. `GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_HOST`, and an
+optional profile-specific `GH_CONFIG_DIR` are added only to the corresponding
+child. The parent environment is never changed and `gh auth switch` is never
+used.
+
+`SecretString` uses shared ownership to avoid unnecessary byte copies, formats
+as `[REDACTED]`, and zeroizes its owned buffer when the last reference is
+dropped. Rust and the operating system may make unavoidable copies during
+allocation, subprocess creation, paging, or crash handling; v0.1 therefore
+documents this as best-effort in-memory protection rather than a guarantee of
+instant memory erasure.
+
+The router logs only typed metadata: `request_id`, `operation_class`,
+`repository`, `profile`, `matched_rule`, `upstream_session_id`, and
+`result_status`. Set `GH_MCP_ROUTER_LOG_LEVEL` to `error`, `warn`, `info`,
+`debug`, or `trace`; higher verbosity changes metadata volume only and never
+weakens redaction. Raw MCP messages, subprocess output, authorization headers,
+and credentials are not log fields. Upstream responses and JSON-RPC error text
+are scrubbed for known and token-shaped values before they reach the client.
+
 ## Concurrency
 
 Supporting multiple identities is only useful if concurrent agent workloads remain safe.
@@ -592,7 +621,7 @@ shared current account
 credential cross-talk
 ```
 
-The test suite will include concurrent mixed-profile requests specifically to catch these failures.
+The test suite includes concurrent mixed-profile requests specifically to catch these failures.
 
 ## Testing strategy
 

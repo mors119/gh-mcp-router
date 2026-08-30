@@ -54,7 +54,7 @@ only repository-scoped `tools/call` requests.
 | `context` | Request-scoped repository resolution, normalization, and source metadata | Credential retrieval, routing policy, GitHub API calls |
 | `routing` | Pure routing decisions, operation classification, and safe fallback policy | Credential retrieval, API calls, CLI state |
 | `credentials` | Credential references, GitHub CLI account discovery, and token retrieval | Repository/profile routing or GitHub API calls |
-| `security` | Secret-safe formatting and `SecretString` cleanup | Full lifecycle hardening beyond value cleanup |
+| `security` | Secret-safe formatting, cancellation, child-environment allowlisting, and redacting observability | GitHub credential retrieval or public multi-tenant secret brokering |
 | `mcp` | Client-facing protocol/proxy boundary | Repository routing policy |
 | `upstream` | Official GitHub MCP session boundary | GitHub API/tool implementation |
 | `cli` | CLI setup, inspection, diagnostics, serving, and command dispatch | The routing engine itself |
@@ -101,9 +101,42 @@ failed child on the next request without retrying the failed message.
 These are design principles. The GitHub CLI provider performs account discovery
 and on-demand token retrieval through explicit subprocess arguments and
 profile-specific `GH_CONFIG_DIR` values. The upstream launcher uses the
-configured `github-mcp-server` executable or PATH lookup and never inherits
-upstream stderr. Repository inference, routing evaluation, and MCP proxying
-remain separate concerns.
+configured `github-mcp-server` executable or PATH lookup, builds an explicit
+minimal child environment, and never inherits upstream stderr. Resolved
+credentials are retained only by their profile-owned session guard so known
+values can be scrubbed from upstream responses before they cross the MCP
+boundary. Repository inference, routing evaluation, and MCP proxying remain
+separate concerns.
+
+## Security hardening
+
+`SecretString` is an `Arc`-backed redacted wrapper. Cloning it shares the
+existing allocation rather than copying token bytes, and the allocation is
+zeroized when released. This is best-effort protection: Rust allocators,
+subprocess creation, and crash handling can create copies outside the wrapper's
+control, so the router does not promise a universal in-memory lifetime
+guarantee.
+
+The process boundary starts with a minimal allowlist (`PATH`, home, locale,
+temporary-directory, and platform runtime values), then adds only the
+profile-specific GitHub token, host, and `GH_CONFIG_DIR`. No parent environment
+mutation or command-line token injection is used. Upstream stderr is discarded
+at the process boundary; `gh` output is held in zeroized buffers and provider
+errors contain categories and non-secret profile references only.
+
+Concurrent requests carry their selected profile and cancellation token for
+their full lifecycle. A per-profile request lock serializes writes to one
+stdio session, while different profiles remain concurrent. Session startup is
+serialized per profile, session identity is immutable, and a failed child is
+discarded without retrying the request. Router shutdown waits for active
+request handlers before closing children, and cancellation never shuts down a
+different profile.
+
+The default log policy is `info`; `debug` and `trace` add only the typed route
+metadata fields `request_id`, `operation_class`, `repository`, `profile`,
+`matched_rule`, `upstream_session_id`, and `result_status`. Every level passes
+through token-pattern redaction. Raw MCP payloads, subprocess output,
+authorization headers, and credentials are not logged.
 
 ## Planned feature ownership
 

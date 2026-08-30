@@ -80,7 +80,8 @@ pub struct RouteMatch {
     pub host: Option<String>,
 }
 
-/// An ordered route rule. The first matching rule wins.
+/// A route rule. The routing engine compares matching rules by specificity;
+/// configuration order only makes same-profile ties stable.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RouteRule {
     pub profile: String,
@@ -353,23 +354,12 @@ impl Config {
                 validate_repo_pattern(repo, &format!("{path}.match.repo"))?;
                 if let Some(owner) = &route.owner {
                     let repo_owner = repo.split_once('/').map(|parts| parts.0);
-                    if repo_owner != Some(owner.as_str()) {
+                    if repo_owner.is_none_or(|repo_owner| !repo_owner.eq_ignore_ascii_case(owner)) {
                         return Err(ConfigError::validation(
                             format!("{path}.match"),
                             "owner conflicts with the owner in repo",
                         ));
                     }
-                }
-            }
-        }
-        self.validate_unreachable_routes()
-    }
-
-    fn validate_unreachable_routes(&self) -> Result<(), ConfigError> {
-        for later in 0..self.routes.len() {
-            for earlier in 0..later {
-                if route_subsumes(&self.routes[earlier], &self.routes[later]) {
-                    return Err(ConfigError::validation(format!("routes[{later}]"), format!("is unreachable because routes[{earlier}] matches every request it could match")));
                 }
             }
         }
@@ -452,48 +442,6 @@ fn validate_repo_pattern(value: &str, path: &str) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
-}
-
-fn route_subsumes(earlier: &RouteRule, later: &RouteRule) -> bool {
-    if !field_subsumes(&earlier.host, &later.host, false) {
-        return false;
-    }
-    if let Some(owner) = &earlier.owner {
-        let later_owner = later.owner.as_deref().or_else(|| {
-            later
-                .repository
-                .as_deref()
-                .and_then(|repo| repo.split_once('/').map(|parts| parts.0))
-        });
-        if later_owner != Some(owner.as_str()) {
-            return false;
-        }
-    }
-    match (&earlier.repository, &later.repository) {
-        (None, _) => true,
-        (Some(left), Some(right)) => glob_matches(left, right),
-        (Some(_), None) => false,
-    }
-}
-
-fn field_subsumes(earlier: &Option<String>, later: &Option<String>, glob: bool) -> bool {
-    match (earlier, later) {
-        (None, _) => true,
-        (Some(left), Some(right)) if left == right => true,
-        (Some(left), Some(right)) if glob => glob_matches(left, right),
-        _ => false,
-    }
-}
-
-fn glob_matches(pattern: &str, value: &str) -> bool {
-    match pattern.split_once('*') {
-        Some((prefix, suffix)) => {
-            value.starts_with(prefix)
-                && value.ends_with(suffix)
-                && value.len() >= prefix.len() + suffix.len()
-        }
-        None => pattern == value,
-    }
 }
 
 /// Expand only `~` and `$NAME`/`${NAME}` path references. Shell commands are
@@ -720,9 +668,9 @@ mod tests {
     }
 
     #[test]
-    fn catches_obviously_unreachable_ordered_rules() {
-        let error = Config::from_yaml_str("profiles:\n  work: { provider: gh, user: work }\nroutes:\n  - match: { owner: ExampleOrg }\n    profile: work\n  - match: { repo: ExampleOrg/security }\n    profile: work\n").unwrap_err();
-        assert!(error.to_string().contains("unreachable"));
+    fn allows_broad_rules_before_narrow_rules_for_specificity_routing() {
+        let config = Config::from_yaml_str("profiles:\n  work: { provider: gh, user: work }\nroutes:\n  - match: { owner: ExampleOrg }\n    profile: work\n  - match: { repo: ExampleOrg/security }\n    profile: work\n").unwrap();
+        assert_eq!(config.routes.len(), 2);
     }
 
     #[test]

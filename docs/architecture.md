@@ -90,7 +90,7 @@ The next features add behavior behind the boundaries established here:
 
 - configuration parsing and validation (`#3`, implemented)
 - GitHub CLI credential discovery (`#4`)
-- deterministic routing evaluation (`#5`)
+- deterministic routing evaluation (`#5`, implemented)
 - repository context discovery and safe write policy (`#6`)
 - profile-isolated upstream sessions (`#7`)
 - MCP request forwarding (`#8`)

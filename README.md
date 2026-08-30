@@ -7,14 +7,15 @@ Route GitHub MCP requests to the right GitHub identity automatically.
 It is designed for developers who work across multiple GitHub identities — personal accounts, work accounts, organizations, client accounts, bot accounts, or permission-scoped credentials — but want to expose **one GitHub MCP tool surface** to their AI tools.
 
 > Project status: pre-release v0.1 development.
-> The local router, CLI, and stdio MCP path are implemented on `main`, but no
-> crates.io package or downloadable release binary is published yet. Treat the
-> current build as a development release, not a production security boundary.
+> The local router, CLI, and stdio MCP path are implemented on `main`. Tagged
+> releases build checksummed binaries for the supported platforms, but v0.1.0
+> remains gated on final validation in Issue #14. Treat pre-release builds as a
+> development release, not a production security boundary.
 
 ## Quick start
 
-The supported installation path today is building from this repository. Start
-with the [installation guide](docs/installation.md), then follow the
+The supported installation paths are a checksummed GitHub Release binary or a
+build from this repository. Start with the [installation guide](docs/installation.md), then follow the
 [configuration guide](docs/configuration.md) to create two identity-only
 profiles and route repositories to them.
 
@@ -36,6 +37,10 @@ upstream failures.
 Credential-free unit and multi-profile integration tests are documented in
 [`docs/testing.md`](docs/testing.md). Live GitHub testing is opt-in and
 non-destructive.
+
+See [compatibility and supported platforms](docs/compatibility.md) for the
+tested official GitHub MCP Server baseline and [the release process](docs/releasing.md)
+for the tag-driven artifact workflow.
 
 ## The problem
 

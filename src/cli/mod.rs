@@ -102,6 +102,13 @@ where
     W: Write,
 {
     let parsed = CliArgs::parse(args)?;
+    if parsed.version {
+        write_text(
+            output,
+            concat!("gh-mcp-router ", env!("CARGO_PKG_VERSION"), "\n"),
+        )?;
+        return Ok(());
+    }
     if parsed.help {
         write_text(output, usage())?;
         return Ok(());
@@ -939,7 +946,7 @@ fn format_explanation(report: &ExplanationReport) -> String {
 }
 
 fn usage() -> &'static str {
-    "gh-mcp-router — route GitHub MCP requests by profile\n\nUsage:\n  gh-mcp-router init [--config PATH] [--profile USER=NAME] [--force]\n  gh-mcp-router profiles [--config PATH] [--json]\n  gh-mcp-router route OWNER/REPO [--config PATH] [--json]\n  gh-mcp-router explain OWNER/REPO [--config PATH] [--json]\n  gh-mcp-router doctor [--config PATH] [--json] [--upstream-binary PATH]\n  gh-mcp-router serve [--config PATH] [--upstream-binary PATH]\n\ninit creates identity-only configuration; it never stores credentials.\n"
+    "gh-mcp-router — route GitHub MCP requests by profile\n\nUsage:\n  gh-mcp-router --version\n  gh-mcp-router init [--config PATH] [--profile USER=NAME] [--force]\n  gh-mcp-router profiles [--config PATH] [--json]\n  gh-mcp-router route OWNER/REPO [--config PATH] [--json]\n  gh-mcp-router explain OWNER/REPO [--config PATH] [--json]\n  gh-mcp-router doctor [--config PATH] [--json] [--upstream-binary PATH]\n  gh-mcp-router serve [--config PATH] [--upstream-binary PATH]\n\ninit creates identity-only configuration; it never stores credentials.\n"
 }
 
 #[derive(Debug)]
@@ -950,6 +957,7 @@ struct CliArgs {
     json: bool,
     force: bool,
     help: bool,
+    version: bool,
     host: Option<String>,
     upstream_binary: Option<PathBuf>,
     profile_assignments: Vec<(String, String)>,
@@ -967,6 +975,7 @@ impl CliArgs {
         let mut json = false;
         let mut force = false;
         let mut help = false;
+        let mut version = false;
         let mut host = None;
         let mut upstream_binary = None;
         let mut profile_assignments = Vec::new();
@@ -974,6 +983,7 @@ impl CliArgs {
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--help" | "-h" => help = true,
+                "--version" | "-V" => version = true,
                 "--json" => json = true,
                 "--force" => force = true,
                 "--config" => config = Some(PathBuf::from(next_value(&mut arguments, "--config")?)),
@@ -1020,6 +1030,7 @@ impl CliArgs {
                 json,
                 force,
                 help: true,
+                version,
                 host,
                 upstream_binary,
                 profile_assignments,
@@ -1041,6 +1052,7 @@ impl CliArgs {
             json,
             force,
             help,
+            version,
             host,
             upstream_binary,
             profile_assignments,
@@ -1319,6 +1331,22 @@ mod tests {
         assert!(args.json);
         assert_eq!(args.command, "route");
         assert_eq!(args.repository.as_deref(), Some("ExampleOrg/repo"));
+    }
+
+    #[test]
+    fn version_output_uses_package_version_without_loading_configuration() {
+        let mut output = Vec::new();
+        try_run_with_writer(
+            ["--version"],
+            credentials(),
+            FakeLauncher::default(),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("gh-mcp-router {}\n", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

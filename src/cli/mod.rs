@@ -28,7 +28,7 @@ use crate::{
     },
     upstream::{
         ProcessUpstreamLauncher, UpstreamConfig, UpstreamError, UpstreamLaunchError,
-        UpstreamLauncher, UpstreamSessionManager,
+        UpstreamLauncher, UpstreamProcessError, UpstreamSessionManager,
     },
 };
 
@@ -418,11 +418,11 @@ where
             let manager = UpstreamSessionManager::new(credentials, launcher, upstream_config);
             for name in startup_profiles {
                 let reference = config.profiles[&name].credential_ref();
-                match manager.start(name.clone(), &reference) {
-                    Ok(_) => checks.push(Check {
+                match probe_upstream(&manager, name.clone(), &reference) {
+                    Ok(()) => checks.push(Check {
                         name: format!("profile:{name}:upstream"),
                         status: "ok".to_owned(),
-                        detail: "startup succeeded".to_owned(),
+                        detail: "startup and MCP ping succeeded".to_owned(),
                     }),
                     Err(error) => checks.push(Check {
                         name: format!("profile:{name}:upstream"),
@@ -488,11 +488,37 @@ fn executable_available(binary: &Path) -> bool {
     if binary.components().count() > 1 {
         return binary.is_file();
     }
-    env::var_os("PATH")
+    let paths = env::var_os("PATH")
         .into_iter()
-        .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
-        .map(|directory| directory.join(binary))
-        .any(|candidate| candidate.is_file())
+        .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>());
+    let pathext = if cfg!(windows) {
+        env::var("PATHEXT").ok()
+    } else {
+        None
+    };
+    executable_available_in_paths(binary, paths, pathext.as_deref())
+}
+
+fn executable_available_in_paths<I>(binary: &Path, paths: I, pathext: Option<&str>) -> bool
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let suffixes = pathext
+        .into_iter()
+        .flat_map(|value| value.split(';'))
+        .filter(|suffix| !suffix.is_empty())
+        .collect::<Vec<_>>();
+
+    paths.into_iter().any(|directory| {
+        let candidate = directory.join(binary);
+        candidate.is_file()
+            || (binary.extension().is_none()
+                && suffixes.iter().any(|suffix| {
+                    let mut filename = binary.as_os_str().to_os_string();
+                    filename.push(suffix);
+                    directory.join(filename).is_file()
+                }))
+    })
 }
 
 fn serialize_config(path: &Path, config: &Config) -> Result<String, CliError> {
@@ -567,7 +593,7 @@ fn route_conflicts(config: &Config) -> Vec<String> {
     let mut conflicts = Vec::new();
     for (left_index, left) in config.routes.iter().enumerate() {
         for (right_index, right) in config.routes.iter().enumerate().skip(left_index + 1) {
-            if left.profile == right.profile || route_key(left) != route_key(right) {
+            if left.profile == right.profile || !routes_overlap_at_same_specificity(left, right) {
                 continue;
             }
             conflicts.push(format!(
@@ -576,6 +602,98 @@ fn route_conflicts(config: &Config) -> Vec<String> {
         }
     }
     conflicts
+}
+
+fn routes_overlap_at_same_specificity(left: &RouteRule, right: &RouteRule) -> bool {
+    let Some((left_specificity, _)) = route_key(left) else {
+        return false;
+    };
+    let Some((right_specificity, _)) = route_key(right) else {
+        return false;
+    };
+    if left_specificity != right_specificity
+        || !optional_constraint_overlap(left.host.as_deref(), right.host.as_deref())
+    {
+        return false;
+    }
+
+    match left_specificity {
+        RouteSpecificity::ExactRepository | RouteSpecificity::RepositoryGlob => {
+            optional_constraint_overlap(left.owner.as_deref(), right.owner.as_deref())
+                && repository_patterns_overlap(
+                    left.repository.as_deref().unwrap_or_default(),
+                    right.repository.as_deref().unwrap_or_default(),
+                )
+        }
+        RouteSpecificity::Owner => {
+            optional_constraint_overlap(left.owner.as_deref(), right.owner.as_deref())
+        }
+        RouteSpecificity::Host => true,
+        RouteSpecificity::Default => false,
+    }
+}
+
+fn optional_constraint_overlap(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => true,
+    }
+}
+
+fn repository_patterns_overlap(left: &str, right: &str) -> bool {
+    let Some((left_owner, left_repository)) = left.split_once('/') else {
+        return false;
+    };
+    let Some((right_owner, right_repository)) = right.split_once('/') else {
+        return false;
+    };
+    segment_patterns_overlap(left_owner, right_owner)
+        && segment_patterns_overlap(left_repository, right_repository)
+}
+
+fn segment_patterns_overlap(left: &str, right: &str) -> bool {
+    let left = left.trim().to_ascii_lowercase();
+    let right = right.trim().to_ascii_lowercase();
+    match (left.split_once('*'), right.split_once('*')) {
+        (None, None) => left == right,
+        (Some((prefix, suffix)), None) => segment_glob_matches(prefix, suffix, &right),
+        (None, Some((prefix, suffix))) => segment_glob_matches(prefix, suffix, &left),
+        (Some((left_prefix, left_suffix)), Some((right_prefix, right_suffix))) => {
+            (left_prefix.starts_with(right_prefix) || right_prefix.starts_with(left_prefix))
+                && (left_suffix.ends_with(right_suffix) || right_suffix.ends_with(left_suffix))
+        }
+    }
+}
+
+fn segment_glob_matches(prefix: &str, suffix: &str, value: &str) -> bool {
+    value.starts_with(prefix)
+        && value.ends_with(suffix)
+        && value.len() >= prefix.len() + suffix.len()
+}
+
+fn probe_upstream<C, L>(
+    manager: &UpstreamSessionManager<C, L>,
+    profile: String,
+    credential: &CredentialRef,
+) -> Result<(), UpstreamError>
+where
+    C: CredentialProvider + Send + Sync,
+    L: UpstreamLauncher,
+{
+    manager.start(profile.clone(), credential)?;
+    let response = manager.send(
+        profile,
+        credential,
+        r#"{"jsonrpc":"2.0","id":"gh-mcp-router-doctor","method":"ping","params":{}}"#,
+    )?;
+    let response = serde_json::from_str::<serde_json::Value>(&response)
+        .map_err(|_| UpstreamError::Process(UpstreamProcessError::InvalidResponse))?;
+    if response.get("error").is_some() {
+        return Err(UpstreamError::Process(
+            UpstreamProcessError::InvalidResponse,
+        ));
+    }
+    Ok(())
 }
 
 fn route_key(rule: &RouteRule) -> Option<(RouteSpecificity, String)> {
@@ -1118,6 +1236,44 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct ProbeLauncher(Arc<AtomicUsize>);
+
+    struct ProbeProcess(Arc<AtomicUsize>);
+
+    impl crate::upstream::UpstreamProcess for ProbeProcess {
+        fn send(&self, message: &str) -> Result<String, UpstreamProcessError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let request: serde_json::Value =
+                serde_json::from_str(message).map_err(|_| UpstreamProcessError::InvalidResponse)?;
+            Ok(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {}
+            })
+            .to_string())
+        }
+
+        fn notify(&self, _message: &str) -> Result<(), UpstreamProcessError> {
+            Ok(())
+        }
+
+        fn is_alive(&self) -> bool {
+            true
+        }
+
+        fn shutdown(&self) {}
+    }
+
+    impl UpstreamLauncher for ProbeLauncher {
+        fn launch(
+            &self,
+            _request: crate::upstream::UpstreamLaunchRequest,
+        ) -> Result<Box<dyn crate::upstream::UpstreamProcess>, UpstreamLaunchError> {
+            Ok(Box::new(ProbeProcess(Arc::clone(&self.0))))
+        }
+    }
+
     fn credentials() -> FakeCredentials {
         FakeCredentials {
             accounts: vec![GhAccount {
@@ -1316,6 +1472,95 @@ mod tests {
             .unwrap()
             .iter()
             .any(|check| check["name"] == "profile:work:account" && check["status"] == "error"));
+    }
+
+    #[test]
+    fn doctor_probes_upstream_protocol_before_reporting_success() {
+        let directory = tempfile_dir();
+        let path = directory.join("config.yaml");
+        config(&path);
+        let launcher = ProbeLauncher::default();
+        let probes = Arc::clone(&launcher.0);
+        let binary = env::current_exe().unwrap();
+        let mut output = Vec::new();
+
+        try_run_with_writer(
+            [
+                "doctor",
+                "--config",
+                path.to_str().unwrap(),
+                "--upstream-binary",
+                binary.to_str().unwrap(),
+                "--json",
+            ],
+            credentials(),
+            launcher,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["healthy"], true);
+        assert!(value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "profile:personal:upstream"
+                && check["detail"] == "startup and MCP ping succeeded"));
+    }
+
+    #[test]
+    fn doctor_detects_overlapping_same_specificity_route_predicates() {
+        let profiles = ["personal", "work"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    ProfileConfig {
+                        provider: "gh".to_owned(),
+                        user: name.to_owned(),
+                        gh_config_dir: None,
+                        host: None,
+                    },
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let config = Config {
+            profiles,
+            routes: vec![
+                RouteRule {
+                    profile: "personal".to_owned(),
+                    owner: Some("ExampleOrg".to_owned()),
+                    ..RouteRule::default()
+                },
+                RouteRule {
+                    profile: "work".to_owned(),
+                    host: Some("github.com".to_owned()),
+                    owner: Some("ExampleOrg".to_owned()),
+                    ..RouteRule::default()
+                },
+            ],
+            default_profile: None,
+            ambiguity_policy: AmbiguityPolicyConfig::default(),
+        };
+
+        assert_eq!(
+            route_conflicts(&config),
+            vec!["routes[0] and routes[1] select different profiles"]
+        );
+    }
+
+    #[test]
+    fn executable_lookup_considers_windows_path_extensions() {
+        let directory = tempfile_dir();
+        fs::write(directory.join("github-mcp-server.EXE"), b"fake").unwrap();
+
+        assert!(executable_available_in_paths(
+            Path::new("github-mcp-server"),
+            [directory],
+            Some(".COM;.EXE")
+        ));
     }
 
     fn tempfile_dir() -> PathBuf {

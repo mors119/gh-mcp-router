@@ -15,6 +15,7 @@ use serde::{
 };
 
 use crate::credentials::CredentialRef;
+use crate::security::redact_sensitive_text;
 
 /// A named GitHub identity configuration used by domain callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -550,7 +551,9 @@ impl ConfigError {
         }
     }
     fn parse(message: String) -> Self {
-        Self::Parse { message }
+        Self::Parse {
+            message: redact_sensitive_text(&message, &[]),
+        }
     }
     fn validation(path: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Validation {

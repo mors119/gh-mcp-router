@@ -20,7 +20,9 @@ use std::{
 
 use crate::{
     credentials::{CredentialError, CredentialProvider, CredentialRef},
-    security::SecretString,
+    security::{
+        apply_minimal_child_environment, redact_sensitive_text, CancellationToken, SecretString,
+    },
 };
 
 const DEFAULT_BINARY: &str = "github-mcp-server";
@@ -90,9 +92,12 @@ impl fmt::Debug for UpstreamEnvironment {
 }
 
 impl UpstreamEnvironment {
-    fn for_credential(reference: &CredentialRef, credential: SecretString) -> Self {
+    fn for_credential(reference: &CredentialRef, credential: &SecretString) -> Self {
         let mut values = BTreeMap::new();
-        values.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_owned(), credential);
+        values.insert(
+            "GITHUB_PERSONAL_ACCESS_TOKEN".to_owned(),
+            credential.clone(),
+        );
         if let Some(host) = reference.host() {
             let host = if host.eq_ignore_ascii_case("github.com") {
                 "https://github.com".to_owned()
@@ -158,6 +163,7 @@ pub enum UpstreamProcessError {
     Io,
     Exited,
     InvalidResponse,
+    Cancelled,
 }
 
 impl fmt::Display for UpstreamProcessError {
@@ -166,6 +172,7 @@ impl fmt::Display for UpstreamProcessError {
             Self::Io => "upstream process I/O failed",
             Self::Exited => "upstream process exited",
             Self::InvalidResponse => "upstream process returned an invalid response",
+            Self::Cancelled => "upstream request was cancelled",
         })
     }
 }
@@ -226,6 +233,7 @@ impl UpstreamLauncher for ProcessUpstreamLauncher {
     ) -> Result<Box<dyn UpstreamProcess>, UpstreamLaunchError> {
         let mut command = Command::new(&request.binary);
         command.args(&request.args);
+        apply_minimal_child_environment(&mut command);
         for (key, value) in &request.environment.0 {
             command.env(key, value.expose());
         }
@@ -415,6 +423,9 @@ impl std::error::Error for UpstreamError {
 struct ManagedSession {
     credential: CredentialRef,
     process: Option<Arc<dyn UpstreamProcess>>,
+    /// Retained only while the profile-owned child is alive so upstream
+    /// responses can be scrubbed before reaching MCP clients.
+    secret: Option<SecretString>,
     request_lock: Arc<Mutex<()>>,
 }
 
@@ -475,7 +486,7 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         let profile = profile.into();
         let session = self.session_for(&profile, credential)?;
         let mut session = session.lock().expect("session lock poisoned");
-        self.ensure_process(&mut session)?;
+        self.ensure_process(&mut session, &CancellationToken::new())?;
         Ok(SessionInfo {
             profile,
             active: true,
@@ -493,7 +504,20 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         credential: &CredentialRef,
         message: &str,
     ) -> Result<String, UpstreamError> {
-        self.send_with_startup(profile, credential, message, |_| Ok(()))
+        self.send_cancellable(profile, credential, message, &CancellationToken::new())
+    }
+
+    /// Send a message while retaining the selected profile for the entire
+    /// request lifecycle. Cancellation drops only the request's work; it does
+    /// not stop or rebind another profile's session.
+    pub fn send_cancellable(
+        &self,
+        profile: impl Into<String>,
+        credential: &CredentialRef,
+        message: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<String, UpstreamError> {
+        self.send_with_startup_cancellable(profile, credential, message, cancellation, |_| Ok(()))
     }
 
     /// Send a request, running `startup` only when a new child process had to
@@ -509,7 +533,30 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
     where
         F: FnOnce(&dyn UpstreamProcess) -> Result<(), UpstreamProcessError>,
     {
+        self.send_with_startup_cancellable(
+            profile,
+            credential,
+            message,
+            &CancellationToken::new(),
+            startup,
+        )
+    }
+
+    pub fn send_with_startup_cancellable<F>(
+        &self,
+        profile: impl Into<String>,
+        credential: &CredentialRef,
+        message: &str,
+        cancellation: &CancellationToken,
+        startup: F,
+    ) -> Result<String, UpstreamError>
+    where
+        F: FnOnce(&dyn UpstreamProcess) -> Result<(), UpstreamProcessError>,
+    {
         let profile = profile.into();
+        if cancellation.is_cancelled() {
+            return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
+        }
         let session = self.session_for(&profile, credential)?;
         let request_lock = session
             .lock()
@@ -517,10 +564,13 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
             .request_lock
             .clone();
         let _request_guard = request_lock.lock().expect("request lock poisoned");
+        if cancellation.is_cancelled() {
+            return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
+        }
 
         let (session, started) = {
             let mut session = session.lock().expect("session lock poisoned");
-            let started = self.ensure_process(&mut session)?;
+            let started = self.ensure_process(&mut session, cancellation)?;
             let process = session
                 .process
                 .as_ref()
@@ -528,6 +578,9 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
                 .clone();
             (process, started)
         };
+        if cancellation.is_cancelled() {
+            return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
+        }
         if started {
             if let Err(error) = startup(session.as_ref()) {
                 let sessions = self.sessions.lock().expect("session map lock poisoned");
@@ -543,7 +596,23 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         }
         let result = session.send(message);
         match result {
-            Ok(response) => Ok(response),
+            Ok(response) => {
+                if cancellation.is_cancelled() {
+                    return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
+                }
+                let managed = self
+                    .sessions
+                    .lock()
+                    .expect("session map lock poisoned")
+                    .get(&profile)
+                    .cloned();
+                let sanitized = managed
+                    .and_then(|managed| managed.lock().ok()?.secret.clone())
+                    .map_or(response.clone(), |secret| {
+                        redact_sensitive_text(&response, &[&secret])
+                    });
+                Ok(sanitized)
+            }
             Err(error) => {
                 let managed = self
                     .sessions
@@ -570,11 +639,33 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         credential: &CredentialRef,
         message: &str,
     ) -> Result<(), UpstreamError> {
+        self.notify_cancellable(profile, credential, message, &CancellationToken::new())
+    }
+
+    pub fn notify_cancellable(
+        &self,
+        profile: impl Into<String>,
+        credential: &CredentialRef,
+        message: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<(), UpstreamError> {
         let profile = profile.into();
+        if cancellation.is_cancelled() {
+            return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
+        }
         let session = self.session_for(&profile, credential)?;
+        let request_lock = session
+            .lock()
+            .expect("session lock poisoned")
+            .request_lock
+            .clone();
+        let _request_guard = request_lock.lock().expect("request lock poisoned");
+        if cancellation.is_cancelled() {
+            return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
+        }
         let process = {
             let mut session = session.lock().expect("session lock poisoned");
-            self.ensure_process(&mut session)?;
+            self.ensure_process(&mut session, cancellation)?;
             session
                 .process
                 .as_ref()
@@ -627,13 +718,18 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         let session = Arc::new(Mutex::new(ManagedSession {
             credential: credential.clone(),
             process: None,
+            secret: None,
             request_lock: Arc::new(Mutex::new(())),
         }));
         sessions.insert(profile.to_owned(), Arc::clone(&session));
         Ok(session)
     }
 
-    fn ensure_process(&self, session: &mut ManagedSession) -> Result<bool, UpstreamError> {
+    fn ensure_process(
+        &self,
+        session: &mut ManagedSession,
+        cancellation: &CancellationToken,
+    ) -> Result<bool, UpstreamError> {
         if session
             .process
             .as_ref()
@@ -642,21 +738,26 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
             return Ok(false);
         }
         session.process.take();
+        session.secret.take();
 
         let secret = self
             .credential_provider
-            .resolve(&session.credential)
+            .resolve_with_cancellation(&session.credential, cancellation)
             .map_err(UpstreamError::Credential)?;
+        if cancellation.is_cancelled() {
+            return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
+        }
         let request = UpstreamLaunchRequest {
             binary: self.config.binary.clone(),
             args: self.config.args.clone(),
-            environment: UpstreamEnvironment::for_credential(&session.credential, secret),
+            environment: UpstreamEnvironment::for_credential(&session.credential, &secret),
         };
-        session.process = Some(Arc::from(
-            self.launcher
-                .launch(request)
-                .map_err(UpstreamError::Launch)?,
-        ));
+        let process = self
+            .launcher
+            .launch(request)
+            .map_err(UpstreamError::Launch)?;
+        session.secret = Some(secret);
+        session.process = Some(Arc::from(process));
         Ok(true)
     }
 }
@@ -732,6 +833,11 @@ mod tests {
             if self.fail_next_send.swap(false, Ordering::SeqCst) {
                 self.alive.store(false, Ordering::SeqCst);
                 return Err(UpstreamProcessError::Io);
+            }
+            if message == "leak" {
+                return Ok(
+                    r#"{"jsonrpc":"2.0","id":1,"result":"ghp_PERSONAL_SYNTHETIC"}"#.to_owned(),
+                );
             }
             Ok(format!(r#"{{"jsonrpc":"2.0","result":"{message}"}}"#))
         }
@@ -863,6 +969,34 @@ mod tests {
     }
 
     #[test]
+    fn high_concurrency_keeps_mixed_profiles_isolated() {
+        let (manager, launcher) = manager();
+        let manager = Arc::new(manager);
+        let handles = (0..64)
+            .map(|index| {
+                let manager = Arc::clone(&manager);
+                thread::spawn(move || {
+                    let (profile, credential) = if index % 2 == 0 {
+                        ("personal", reference("personal"))
+                    } else {
+                        ("work", reference("work"))
+                    };
+                    manager.send(profile, &credential, &format!("request-{index}"))
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            assert!(handle.join().unwrap().is_ok());
+        }
+
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
+        assert!(manager
+            .session_info()
+            .into_iter()
+            .all(|session| session.active));
+    }
+
+    #[test]
     fn failed_process_is_restarted_without_retrying_the_failed_message() {
         let (manager, launcher) = manager();
         launcher.fail_next_send.store(true, Ordering::SeqCst);
@@ -932,6 +1066,38 @@ mod tests {
     }
 
     #[test]
+    fn upstream_responses_are_scrubbed_with_the_profile_owned_secret() {
+        let (manager, _launcher) = manager();
+        let response = manager
+            .send("personal", &reference("personal"), "leak")
+            .unwrap();
+
+        assert!(!response.contains("ghp_PERSONAL_SYNTHETIC"));
+        assert!(response.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn cancelled_startup_does_not_create_a_child_or_invalidate_other_profiles() {
+        let (manager, launcher) = manager();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert!(matches!(
+            manager.send_cancellable(
+                "personal",
+                &reference("personal"),
+                "cancelled",
+                &cancellation,
+            ),
+            Err(UpstreamError::Process(UpstreamProcessError::Cancelled))
+        ));
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 0);
+
+        assert!(manager.send("work", &reference("work"), "healthy").is_ok());
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn process_launcher_reports_missing_explicit_binary() {
         let launcher = ProcessUpstreamLauncher;
         let request = UpstreamLaunchRequest {
@@ -939,7 +1105,7 @@ mod tests {
             args: vec!["stdio".to_owned()],
             environment: UpstreamEnvironment::for_credential(
                 &reference("personal"),
-                SecretString::new("ghp_SYNTHETIC"),
+                &SecretString::new("ghp_SYNTHETIC"),
             ),
         };
 

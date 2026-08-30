@@ -2,10 +2,12 @@
 
 use std::fmt;
 
+use zeroize::Zeroize;
+
 /// A secret value whose ordinary formatting paths always redact its contents.
 ///
-/// Memory zeroization and provider-specific secret lifecycle rules are deferred
-/// until the security-hardening work has a concrete requirement.
+/// The backing string is zeroized when the value is dropped. Provider-specific
+/// secret lifecycle rules remain separate concerns.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretString(String);
 
@@ -30,6 +32,12 @@ impl fmt::Debug for SecretString {
 impl fmt::Display for SecretString {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("[REDACTED]")
+    }
+}
+
+impl Drop for SecretString {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 

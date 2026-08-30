@@ -161,7 +161,7 @@ Instead, each profile should resolve its own credential without changing global 
 
 ### Local-first credential handling
 
-The initial credential provider will integrate with the GitHub CLI.
+The initial credential provider integrates with the GitHub CLI.
 
 Conceptually:
 

@@ -579,19 +579,19 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
             (process, started)
         };
         if cancellation.is_cancelled() {
+            if started {
+                self.discard_process(&profile);
+            }
             return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
         }
         if started {
             if let Err(error) = startup(session.as_ref()) {
-                let sessions = self.sessions.lock().expect("session map lock poisoned");
-                if let Some(managed) = sessions.get(&profile) {
-                    managed
-                        .lock()
-                        .expect("session lock poisoned")
-                        .process
-                        .take();
-                }
+                self.discard_process(&profile);
                 return Err(UpstreamError::Process(error));
+            }
+            if cancellation.is_cancelled() {
+                self.discard_process(&profile);
+                return Err(UpstreamError::Process(UpstreamProcessError::Cancelled));
             }
         }
         let result = session.send(message);
@@ -614,19 +614,7 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
                 Ok(sanitized)
             }
             Err(error) => {
-                let managed = self
-                    .sessions
-                    .lock()
-                    .expect("session map lock poisoned")
-                    .get(&profile)
-                    .cloned();
-                if let Some(managed) = managed {
-                    managed
-                        .lock()
-                        .expect("session lock poisoned")
-                        .process
-                        .take();
-                }
+                self.discard_process(&profile);
                 Err(UpstreamError::Process(error))
             }
         }
@@ -674,14 +662,34 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         };
         let result = process.notify(message);
         if let Err(error) = result {
-            let sessions = self.sessions.lock().expect("session map lock poisoned");
-            if let Some(session) = sessions.get(&profile) {
-                session
-                    .lock()
-                    .expect("session lock poisoned")
-                    .process
-                    .take();
-            }
+            self.discard_process(&profile);
+            return Err(UpstreamError::Process(error));
+        }
+        Ok(())
+    }
+
+    /// Forward an MCP cancellation without waiting behind the request it
+    /// cancels. The process owns its stdin mutex, so this remains safe while
+    /// another request is blocked reading a response. Cancellation never
+    /// starts a new child merely to deliver a notification.
+    pub fn notify_cancellation(
+        &self,
+        profile: impl Into<String>,
+        credential: &CredentialRef,
+        message: &str,
+    ) -> Result<(), UpstreamError> {
+        let profile = profile.into();
+        let session = self.session_for(&profile, credential)?;
+        let process = {
+            let session = session.lock().expect("session lock poisoned");
+            session
+                .process
+                .as_ref()
+                .ok_or(UpstreamError::Process(UpstreamProcessError::Exited))?
+                .clone()
+        };
+        if let Err(error) = process.notify(message) {
+            self.discard_process(&profile);
             return Err(UpstreamError::Process(error));
         }
         Ok(())
@@ -693,10 +701,10 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
             std::mem::take(&mut *self.sessions.lock().expect("session map lock poisoned"));
         for session in sessions.into_values() {
             if let Ok(mut session) = session.lock() {
-                if let Some(process) = session.process.as_mut() {
+                if let Some(process) = session.process.take() {
                     process.shutdown();
                 }
-                session.process.take();
+                session.secret.take();
             }
         }
     }
@@ -723,6 +731,23 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         }));
         sessions.insert(profile.to_owned(), Arc::clone(&session));
         Ok(session)
+    }
+
+    fn discard_process(&self, profile: &str) {
+        let process = self
+            .sessions
+            .lock()
+            .expect("session map lock poisoned")
+            .get(profile)
+            .cloned()
+            .and_then(|managed| {
+                let mut managed = managed.lock().expect("session lock poisoned");
+                managed.secret.take();
+                managed.process.take()
+            });
+        if let Some(process) = process {
+            process.shutdown();
+        }
     }
 
     fn ensure_process(
@@ -767,10 +792,10 @@ impl<C, L> Drop for UpstreamSessionManager<C, L> {
         let sessions = std::mem::take(self.sessions.get_mut().expect("session map lock poisoned"));
         for session in sessions.into_values() {
             if let Ok(mut session) = session.lock() {
-                if let Some(process) = session.process.as_mut() {
+                if let Some(process) = session.process.take() {
                     process.shutdown();
                 }
-                session.process.take();
+                session.secret.take();
             }
         }
     }
@@ -1006,6 +1031,8 @@ mod tests {
             manager.send("personal", &credential, "write-once"),
             Err(UpstreamError::Process(UpstreamProcessError::Io))
         ));
+        let session = manager.session_for("personal", &credential).unwrap();
+        assert!(session.lock().unwrap().secret.is_none());
         assert!(manager
             .send("personal", &credential, "retry-after-restart")
             .is_ok());
@@ -1095,6 +1122,60 @@ mod tests {
 
         assert!(manager.send("work", &reference("work"), "healthy").is_ok());
         assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancellation_during_startup_discards_the_uninitialized_child() {
+        let (manager, launcher) = manager();
+        let cancellation = CancellationToken::new();
+        let cancellation_for_startup = cancellation.clone();
+        let credential = reference("personal");
+
+        let result = manager.send_with_startup_cancellable(
+            "personal",
+            &credential,
+            "must-not-run",
+            &cancellation,
+            move |_| {
+                cancellation_for_startup.cancel();
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(UpstreamError::Process(UpstreamProcessError::Cancelled))
+        ));
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(launcher.shutdowns.load(Ordering::SeqCst), 1);
+
+        let startup_runs = Arc::new(AtomicUsize::new(0));
+        let startup_runs_for_hook = Arc::clone(&startup_runs);
+        manager
+            .send_with_startup("personal", &credential, "after-cancel", move |_| {
+                startup_runs_for_hook.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(startup_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn cancellation_notification_does_not_wait_for_the_profile_request_lock() {
+        let (manager, _launcher) = manager();
+        let credential = reference("personal");
+        manager.start("personal", &credential).unwrap();
+        let session = manager.session_for("personal", &credential).unwrap();
+        let request_lock = session.lock().unwrap().request_lock.clone();
+        let _request_guard = request_lock.lock().unwrap();
+
+        manager
+            .notify_cancellation(
+                "personal",
+                &credential,
+                r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#,
+            )
+            .unwrap();
     }
 
     #[test]

@@ -567,7 +567,7 @@ where
             request.cancellation.cancel();
             let credential = self.profile_credential(&request.profile)?;
             self.upstream
-                .notify(request.profile, &credential, raw_message)?;
+                .notify_cancellation(request.profile, &credential, raw_message)?;
         }
         Ok(())
     }

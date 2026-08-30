@@ -19,7 +19,8 @@ profiles:
     gh_config_dir: ${HOME}/.config/gh-enterprise
     host: github.example.com
 
-# Rules are evaluated in order; the first matching rule wins.
+# Rules are compared by specificity: exact repo > repo glob > owner > host.
+# If equally specific rules select different profiles, routing is ambiguous.
 routes:
   - match:
       repo: ExampleOrg/security-*

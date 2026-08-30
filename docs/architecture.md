@@ -12,6 +12,12 @@ remains upstream, while this project owns the identity-selection boundary.
 
 ## Planned flow
 
+The v0.1 client transport is JSON-RPC 2.0 over newline-delimited stdio. The
+router forwards the official upstream MCP protocol version and capabilities;
+it does not advertise a separate GitHub tool schema. Profile sessions are
+validated during initialization before the client receives the public tool
+surface.
+
 ```text
 MCP Client
     |
@@ -33,7 +39,9 @@ GitHub
 The configuration boundary parses and validates profiles and ordered route rules
 before later services start. Credential providers resolve account references,
 while discovery, routing evaluation, upstream sessions, and MCP forwarding
-remain separate concerns.
+remain separate concerns. The MCP proxy forwards upstream lifecycle and
+capability messages, derives one public tool surface after validating every
+profile's tool schema, and routes only repository-scoped `tools/call` requests.
 
 ## Module responsibilities
 
@@ -103,6 +111,6 @@ The next features add behavior behind the boundaries established here:
 - deterministic routing evaluation (`#5`, implemented)
 - repository context discovery and safe write policy (`#6`, implemented)
 - profile-isolated upstream sessions (`#7`, implemented)
-- MCP request forwarding (`#8`)
+- MCP request forwarding (`#8`, implemented)
 - complete CLI workflows (`#9`)
 - deeper secret, concurrency, logging, and process hardening (`#10`)

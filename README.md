@@ -301,8 +301,30 @@ without retrying the request and restarted on the next request; shutdown closes
 and terminates all child sessions.
 
 The upstream boundary forwards newline-delimited messages and does not define
-GitHub tools itself. Client-facing routing and MCP tool-surface preservation
-are handled by the follow-up MCP routing feature.
+GitHub tools itself.
+
+## MCP request routing
+
+Issue #8 adds the client-facing MCP proxy. v0.1 supports JSON-RPC 2.0 over
+newline-delimited stdio and forwards the upstream `initialize` response,
+capabilities, tool definitions, tool arguments, results, and errors. The
+client sends one `tools/list` surface; profile-specific tool names are never
+created. During initialization the router obtains tool metadata from every
+configured profile and rejects incompatible upstream tool schemas.
+
+`tools/call` requests are classified and routed from their original arguments.
+Arguments are not rewritten. Explicit repository context is routed through the
+configured precedence and safe write policy. A repository-free read may use the
+explicitly configured `default_profile`; writes and unknown operations without
+deterministic context fail closed. `resources/*`, `prompts/*`, `ping`, and
+other supported protocol metadata requests are forwarded through the primary
+validated session. `initialized`, cancellation, shutdown, and exit lifecycle
+messages are handled by the proxy and profile sessions without exposing
+credentials.
+
+The proxy can be used as a library through `McpRouter::handle_message` or its
+newline-delimited `serve_stdio` entry point. The command-line `serve` wiring
+remains part of the later CLI workflow feature.
 
 HTTP upstream routing with request-scoped authorization may be explored later where appropriate, but it is not required for the first implementation.
 

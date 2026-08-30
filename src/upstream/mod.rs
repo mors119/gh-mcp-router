@@ -177,6 +177,8 @@ impl std::error::Error for UpstreamProcessError {}
 /// data in future protocol versions.
 pub trait UpstreamProcess: Send {
     fn send(&mut self, message: &str) -> Result<String, UpstreamProcessError>;
+    /// Send a JSON-RPC notification that does not have a response.
+    fn notify(&mut self, message: &str) -> Result<(), UpstreamProcessError>;
     fn is_alive(&mut self) -> bool;
     fn shutdown(&mut self);
 }
@@ -273,16 +275,7 @@ impl UpstreamProcess for ProcessUpstreamSession {
         if !self.is_alive() {
             return Err(UpstreamProcessError::Exited);
         }
-        let stdin = self.stdin.as_mut().ok_or(UpstreamProcessError::Exited)?;
-        stdin
-            .write_all(message.as_bytes())
-            .map_err(|_| UpstreamProcessError::Io)?;
-        if !message.ends_with('\n') {
-            stdin
-                .write_all(b"\n")
-                .map_err(|_| UpstreamProcessError::Io)?;
-        }
-        stdin.flush().map_err(|_| UpstreamProcessError::Io)?;
+        self.write_message(message)?;
 
         let mut response = String::new();
         let bytes = self
@@ -297,6 +290,13 @@ impl UpstreamProcess for ProcessUpstreamSession {
             return Err(UpstreamProcessError::InvalidResponse);
         }
         Ok(response.to_owned())
+    }
+
+    fn notify(&mut self, message: &str) -> Result<(), UpstreamProcessError> {
+        if !self.is_alive() {
+            return Err(UpstreamProcessError::Exited);
+        }
+        self.write_message(message)
     }
 
     fn is_alive(&mut self) -> bool {
@@ -319,6 +319,21 @@ impl UpstreamProcess for ProcessUpstreamSession {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl ProcessUpstreamSession {
+    fn write_message(&mut self, message: &str) -> Result<(), UpstreamProcessError> {
+        let stdin = self.stdin.as_mut().ok_or(UpstreamProcessError::Exited)?;
+        stdin
+            .write_all(message.as_bytes())
+            .map_err(|_| UpstreamProcessError::Io)?;
+        if !message.ends_with('\n') {
+            stdin
+                .write_all(b"\n")
+                .map_err(|_| UpstreamProcessError::Io)?;
+        }
+        stdin.flush().map_err(|_| UpstreamProcessError::Io)
     }
 }
 
@@ -467,6 +482,29 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         }
     }
 
+    /// Forward a JSON-RPC notification through a profile's session.
+    pub fn notify(
+        &self,
+        profile: impl Into<String>,
+        credential: &CredentialRef,
+        message: &str,
+    ) -> Result<(), UpstreamError> {
+        let profile = profile.into();
+        let session = self.session_for(&profile, credential)?;
+        let mut session = session.lock().expect("session lock poisoned");
+        self.ensure_process(&mut session)?;
+        let result = session
+            .process
+            .as_mut()
+            .expect("ensure_process installs a process")
+            .notify(message);
+        if let Err(error) = result {
+            session.process.take();
+            return Err(UpstreamError::Process(error));
+        }
+        Ok(())
+    }
+
     /// Shut down every child and remove all cached sessions.
     pub fn shutdown(&self) {
         let sessions =
@@ -604,6 +642,10 @@ mod tests {
                 return Err(UpstreamProcessError::Io);
             }
             Ok(format!(r#"{{"jsonrpc":"2.0","result":"{message}"}}"#))
+        }
+
+        fn notify(&mut self, _message: &str) -> Result<(), UpstreamProcessError> {
+            Ok(())
         }
 
         fn is_alive(&mut self) -> bool {

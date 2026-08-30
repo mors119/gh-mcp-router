@@ -10,7 +10,7 @@ GitHub identities.
 The project does not replace the official server. GitHub capability behavior
 remains upstream, while this project owns the identity-selection boundary.
 
-## Planned flow
+## Implemented v0.1 flow
 
 The v0.1 client transport is JSON-RPC 2.0 over newline-delimited stdio. The
 router forwards the official upstream MCP protocol version and capabilities;
@@ -138,18 +138,18 @@ metadata fields `request_id`, `operation_class`, `repository`, `profile`,
 through token-pattern redaction. Raw MCP payloads, subprocess output,
 authorization headers, and credentials are not logged.
 
-## Planned feature ownership
+## Feature ownership
 
 The next features add behavior behind the boundaries established here:
 
 - configuration parsing and validation (`#3`, implemented)
-- GitHub CLI credential discovery (`#4`)
+- GitHub CLI credential discovery (`#4`, implemented)
 - deterministic routing evaluation (`#5`, implemented)
 - repository context discovery and safe write policy (`#6`, implemented)
 - profile-isolated upstream sessions (`#7`, implemented)
 - MCP request forwarding (`#8`, implemented)
 - complete CLI workflows (`#9`, implemented)
-- deeper secret, concurrency, logging, and process hardening (`#10`)
+- deeper secret, concurrency, logging, and process hardening (`#10`, implemented)
 
 ## CLI boundary
 

@@ -16,7 +16,7 @@ pub enum ContextSource {
     ConfiguredFallback,
 }
 
-/// Repository identity used by future routing decisions.
+/// Repository identity consumed by routing decisions.
 ///
 /// This type contains no authentication state and can therefore be created and
 /// passed through the application independently of credential handling.

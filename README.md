@@ -304,7 +304,9 @@ owner: ExampleOrg
 repo:  backend
 ```
 
-This normalized context can then be evaluated by the routing engine.
+This normalized context is evaluated by the pure routing engine. It returns the
+selected profile, the winning rule and specificity, or an explicit no-match or
+ambiguous result.
 
 ## Planned CLI
 
@@ -330,9 +332,14 @@ Use `--config PATH` to select another YAML or JSON file.
 The complete v0.1 schema is checked in at
 [`examples/config.example.yaml`](examples/config.example.yaml). It supports
 named credential references, optional per-profile `GH_CONFIG_DIR` and host
-isolation, ordered exact/glob repository, owner, and host routes, a default
-profile, and separate read/write ambiguity policies. Unknown fields are
-rejected, including token/PAT fields.
+isolation, exact/glob repository, owner, and host routes, a default profile,
+and separate read/write ambiguity policies. Routes are evaluated by
+`exact repository > repository glob > owner > host > default`; conflicting
+equally specific profiles produce an explicit ambiguous result. Unknown fields
+are rejected, including token/PAT fields. GitHub host, owner, and repository
+matching is case-insensitive; explanations retain the configured spelling. If
+equally specific matching rules select the same profile, the first configured
+rule is reported as the stable tie-breaker.
 
 The remaining commands are part of the v0.1 roadmap and are not available yet;
 `validate` is available now for checking configuration files.

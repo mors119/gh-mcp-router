@@ -1,7 +1,8 @@
 //! Architectural foundation for `gh-mcp-router`.
 //!
 //! The crate is intentionally small. These modules define ownership boundaries
-//! for later features without performing discovery, routing, or MCP work yet.
+//! while keeping repository routing separate from discovery, credentials, and
+//! MCP work.
 
 pub mod cli;
 pub mod config;

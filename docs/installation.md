@@ -90,7 +90,12 @@ GH_CONFIG_DIR="$HOME/.config/gh-work" gh auth status --hostname github.com
 
 Reference those existing directories with `gh_config_dir` in the profile
 configuration. The directory must exist when `profiles`, `doctor`, or `serve`
-uses that profile.
+uses that profile. This is an alternative to the shared `gh` configuration
+workflow below: the current `init` command discovers accounts from the default
+GitHub CLI configuration and has no option to discover accounts from multiple
+`GH_CONFIG_DIR` values. For this isolated setup, skip `init` and create the
+profiles manually using the examples in
+[`configuration.md`](configuration.md), including each `gh_config_dir`.
 
 `gh-mcp-router` never runs `gh auth switch`. It does not change the parent
 process's active account and it does not require a globally selected account to
@@ -98,7 +103,8 @@ be changed while requests are in flight.
 
 ## Create a starter configuration
 
-Use `init` after authenticating `gh`:
+Use `init` when the accounts are available in the default GitHub CLI
+configuration:
 
 ```bash
 gh-mcp-router init \

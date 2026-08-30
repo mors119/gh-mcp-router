@@ -27,8 +27,12 @@ one profile and cannot be reused for another profile. Profile-specific host and
 
 Repository context and routing are request-scoped. The router prefers explicit
 owner/repository arguments, then other documented repository sources. A missing
-or ambiguous context is not silently repaired. Writes fail closed unless the
-configured policy explicitly permits a default profile.
+or ambiguous context is not silently repaired, and writes with either condition
+always fail closed. For a known operation with a concrete repository context
+that has no matching route, the configured policy may explicitly permit a
+default profile. Ambiguous matching routes are never resolved by that policy;
+repository-free reads may use an explicit default, while repository-free writes
+and unknown operations require deterministic context.
 
 Use these commands before enabling a client:
 

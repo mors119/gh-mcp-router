@@ -10,10 +10,12 @@ evaluated in this order:
 exact repository > repository glob > owner > host > default
 ```
 
-At one specificity, different profiles produce an ambiguous result. A write
-must not fall back to `default_profile` unless
-`ambiguity_policy.write: default_profile` is explicitly configured. The safer
-default is to fail closed.
+At one specificity, different profiles produce an ambiguous result and are
+always rejected. A concrete repository context with no matching route may use
+`default_profile` only when the corresponding policy explicitly allows it. A
+missing repository context is never made safe by that policy: repository-free
+reads may use an explicit default, while writes and unknown operations require
+deterministic context. The safer default is to fail closed.
 
 ## Personal and work accounts
 

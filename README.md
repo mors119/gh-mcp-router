@@ -9,6 +9,10 @@ It is designed for developers who work across multiple GitHub identities — per
 > Project status: early development.
 > The v0.1 architecture and roadmap are defined, but the router is not yet ready for production use.
 
+Credential-free unit and multi-profile integration tests are documented in
+[`docs/testing.md`](docs/testing.md). Live GitHub testing is opt-in and
+non-destructive.
+
 ## The problem
 
 The GitHub MCP Server normally runs with one authentication context.

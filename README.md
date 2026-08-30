@@ -195,6 +195,29 @@ The operation should fail instead of silently using a default account.
 
 Read operations may support explicitly configured fallback policies, but routing decisions must remain observable.
 
+### Repository context and write safety
+
+The router resolves repository context in this order, stopping at the first
+valid source:
+
+1. explicit `owner` and `repo` tool arguments;
+2. a full `owner/repository` argument;
+3. a GitHub repository URL;
+4. the request-scoped MCP root or workspace root's Git `origin` remote; and
+5. an explicitly configured default context.
+
+Common HTTPS, SCP-style SSH, and `ssh://` remotes are normalized to
+`host`, `owner`, `repository`, and a recorded source. Context discovery is
+read-only and never calls GitHub APIs. An explicit request wins over conflicting
+ambient context.
+
+Known read and write tools use separate operation classes. Unknown tools are
+treated conservatively. Ambiguous routes always fail closed; writes cannot use
+the default profile unless `ambiguity_policy.write: default_profile` is
+explicitly configured. Read fallback decisions record that the default profile
+was used. Missing or ambiguous repository context produces an actionable error
+instead of guessing an identity.
+
 ### Keep GitHub MCP upstream
 
 `gh-mcp-router` is not intended to implement GitHub Issues, Pull Requests, Actions, repositories, releases, or other GitHub APIs itself.

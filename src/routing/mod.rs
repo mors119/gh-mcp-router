@@ -248,6 +248,24 @@ pub struct RoutingEngine<'config> {
     config: &'config Config,
 }
 
+/// One entry in a routing evaluation trace. This contains only route metadata
+/// and is safe to expose in diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleEvaluation {
+    pub index: usize,
+    pub rule: String,
+    pub matched: bool,
+    pub specificity: Option<RouteSpecificity>,
+}
+
+/// Complete, side-effect-free routing trace used by CLI diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoutingExplanation {
+    pub context: RepositoryContext,
+    pub rules: Vec<RuleEvaluation>,
+    pub result: RoutingResult,
+}
+
 impl<'config> RoutingEngine<'config> {
     pub fn new(config: &'config Config) -> Self {
         Self { config }
@@ -333,6 +351,30 @@ pub fn evaluate(config: &Config, context: &RepositoryContext) -> RoutingResult {
             fallback_used: true,
         }),
         None => RoutingResult::NoMatch(NoMatch { repository }),
+    }
+}
+
+/// Evaluate a route and retain every rule considered along the way.
+pub fn explain(config: &Config, context: &RepositoryContext) -> RoutingExplanation {
+    let rules = config
+        .routes
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| {
+            let specificity = matching_specificity(rule, context);
+            RuleEvaluation {
+                index,
+                rule: describe_rule(rule),
+                matched: specificity.is_some(),
+                specificity,
+            }
+        })
+        .collect();
+
+    RoutingExplanation {
+        context: context.clone(),
+        rules,
+        result: evaluate(config, context),
     }
 }
 

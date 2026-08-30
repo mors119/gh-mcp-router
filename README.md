@@ -371,7 +371,7 @@ This normalized context is evaluated by the pure routing engine. It returns the
 selected profile, the winning rule and specificity, or an explicit no-match or
 ambiguous result.
 
-## Planned CLI
+## CLI
 
 The v0.1 CLI is expected to provide:
 
@@ -404,8 +404,8 @@ matching is case-insensitive; explanations retain the configured spelling. If
 equally specific matching rules select the same profile, the first configured
 rule is reported as the stable tie-breaker.
 
-The remaining commands are part of the v0.1 roadmap and are not available yet;
-`validate` is available now for checking configuration files.
+All commands above are available in the v0.1 CLI. `validate` remains
+available for checking configuration files in automation.
 
 ### `init`
 
@@ -415,13 +415,16 @@ Create an initial profile/routing configuration using locally authenticated GitH
 gh-mcp-router init
 ```
 
-The command must never copy raw GitHub credentials into the generated configuration.
+The command never copies raw GitHub credentials into the generated
+configuration. It refuses to replace an existing file unless `--force`
+is supplied, and repeated `--profile USER=NAME` options assign friendly
+names.
 
 ### `profiles`
 
 Inspect configured identities without exposing credentials.
 
-Expected style:
+Human-readable output:
 
 ```text
 PROFILE    USER          HOST        PROVIDER   AUTH
@@ -437,7 +440,7 @@ Test routing before connecting an MCP client.
 gh-mcp-router route ExampleOrg/backend
 ```
 
-Expected style:
+Human-readable output:
 
 ```text
 Repository: ExampleOrg/backend
@@ -460,7 +463,7 @@ This is intended to make account routing deterministic and debuggable instead of
 
 Diagnose common configuration problems.
 
-Planned checks include:
+Checks include:
 
 ```text
 configuration
@@ -482,7 +485,57 @@ Start the MCP router.
 gh-mcp-router serve
 ```
 
-MCP clients will eventually point to this process instead of launching the GitHub MCP Server directly.
+MCP clients can point to this process instead of launching the GitHub MCP Server
+directly.
+
+## CLI workflow
+
+The binary provides setup, inspection, diagnostics, and serving commands:
+
+    gh-mcp-router init
+    gh-mcp-router profiles
+    gh-mcp-router route OWNER/REPO
+    gh-mcp-router explain OWNER/REPO
+    gh-mcp-router doctor
+    gh-mcp-router serve
+
+Use --config PATH with any command to select a configuration file. The
+default is ~/.config/gh-mcp-router/config.yaml on Unix-like systems. init
+discovers authenticated accounts through gh auth status, writes only profile
+references, and refuses to replace an existing file unless --force is
+provided. Friendly names can be assigned with repeated --profile USER=NAME
+options:
+
+    gh-mcp-router init --profile mors119=personal --profile work-account=work
+
+The generated file contains no tokens. Add route rules to it, then inspect a
+decision before connecting an MCP client:
+
+    gh-mcp-router route ExampleOrg/backend
+    gh-mcp-router explain ExampleOrg/backend --json
+    gh-mcp-router profiles --json
+    gh-mcp-router doctor --json
+
+route and explain do not retrieve credentials. profiles verifies account
+status without printing credentials. doctor checks configuration, gh,
+configured accounts and config directories, obvious route conflicts, the
+github-mcp-server executable, credential availability, and upstream process
+startup. Diagnostic failures use non-zero exit codes and never include token
+values.
+
+For an MCP client, configure one stdio server command:
+
+    {
+      "mcpServers": {
+        "github": {
+          "command": "gh-mcp-router",
+          "args": ["serve", "--config", "/absolute/path/to/config.yaml"]
+        }
+      }
+    }
+
+The router uses newline-delimited JSON-RPC 2.0 over stdio and preserves the
+official GitHub MCP tool surface.
 
 ## Security model
 

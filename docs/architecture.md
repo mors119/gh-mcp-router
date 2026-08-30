@@ -57,7 +57,7 @@ only repository-scoped `tools/call` requests.
 | `security` | Secret-safe formatting, cancellation, child-environment allowlisting, and redacting observability | GitHub credential retrieval or public multi-tenant secret brokering |
 | `mcp` | Client-facing protocol/proxy boundary | Repository routing policy |
 | `upstream` | Official GitHub MCP session boundary | GitHub API/tool implementation |
-| `cli` | Presentation and command dispatch | The routing engine itself |
+| `cli` | CLI setup, inspection, diagnostics, serving, and command dispatch | The routing engine itself |
 
 The project remains a single crate until a real boundary justifies splitting
 it. Domain values are intentionally small and can be constructed independently
@@ -148,5 +148,15 @@ The next features add behavior behind the boundaries established here:
 - repository context discovery and safe write policy (`#6`, implemented)
 - profile-isolated upstream sessions (`#7`, implemented)
 - MCP request forwarding (`#8`, implemented)
-- complete CLI workflows (`#9`)
-- secret, concurrency, logging, and process hardening (`#10`, implemented)
+- complete CLI workflows (`#9`, implemented)
+- deeper secret, concurrency, logging, and process hardening (`#10`)
+
+## CLI boundary
+
+The CLI loads and validates configuration before invoking application
+behavior. route and explain construct a repository context and call the pure
+routing evaluator; they do not resolve credentials. profiles and doctor use
+the credential provider's non-secret account checks. serve constructs the MCP
+router with the configured upstream executable and starts the client-facing
+stdio transport. JSON output is available for inspection commands, and
+diagnostic failures use stable command-line exit categories.

@@ -761,19 +761,15 @@ Model Context Protocol:
 
 https://modelcontextprotocol.io/
 
-## Contributing
+## Contributing and project policies
 
-The project is currently in its initial implementation phase.
+Contributions, bug reports, and security reports are welcome. Start with
+[`CONTRIBUTING.md`](CONTRIBUTING.md), [`SUPPORT.md`](SUPPORT.md), and the
+[open issues](https://github.com/mors119/gh-mcp-router/issues). Please use the
+private process in [`SECURITY.md`](SECURITY.md) for vulnerabilities; never put
+credentials or authorization headers in a public issue or pull request.
 
-Before implementing a feature, check the v0.1 Epic and the Feature issue that owns the behavior.
-
-Changes should:
-
-- keep the router focused on identity and request routing,
-- avoid duplicating official GitHub MCP functionality,
-- preserve deterministic routing,
-- keep credentials out of persistent configuration,
-- add tests for changed behavior,
-- and avoid unrelated architectural expansion.
-
-Early feedback on multi-account workflows, organization routing, credential isolation, and MCP client compatibility is welcome.
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md) and is
+licensed under the [Apache License 2.0](LICENSE). See [`CHANGELOG.md`](CHANGELOG.md)
+for notable changes and [`docs/releasing.md`](docs/releasing.md) for the
+maintainer release process.

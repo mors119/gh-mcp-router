@@ -318,9 +318,12 @@ configured precedence and safe write policy. A repository-free read may use the
 explicitly configured `default_profile`; writes and unknown operations without
 deterministic context fail closed. `resources/*`, `prompts/*`, `ping`, and
 other supported protocol metadata requests are forwarded through the primary
-validated session. `initialized`, cancellation, shutdown, and exit lifecycle
-messages are handled by the proxy and profile sessions without exposing
-credentials.
+validated session. When the client advertises roots support, the proxy
+requests `roots/list` after initialization and uses a single returned file
+root for workspace/Git-remote context; multiple roots remain intentionally
+ambiguous. The proxy completes each upstream handshake before metadata
+discovery, then consumes the client's `initialized` notification. Cancellation,
+shutdown, and exit lifecycle messages are handled without exposing credentials.
 
 The proxy can be used as a library through `McpRouter::handle_message` or its
 newline-delimited `serve_stdio` entry point. The command-line `serve` wiring

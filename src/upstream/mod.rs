@@ -175,12 +175,12 @@ impl std::error::Error for UpstreamProcessError {}
 /// A running upstream process. Implementations must not include payloads or
 /// child stderr in errors, because upstream messages may contain sensitive
 /// data in future protocol versions.
-pub trait UpstreamProcess: Send {
-    fn send(&mut self, message: &str) -> Result<String, UpstreamProcessError>;
+pub trait UpstreamProcess: Send + Sync {
+    fn send(&self, message: &str) -> Result<String, UpstreamProcessError>;
     /// Send a JSON-RPC notification that does not have a response.
-    fn notify(&mut self, message: &str) -> Result<(), UpstreamProcessError>;
-    fn is_alive(&mut self) -> bool;
-    fn shutdown(&mut self);
+    fn notify(&self, message: &str) -> Result<(), UpstreamProcessError>;
+    fn is_alive(&self) -> bool;
+    fn shutdown(&self);
 }
 
 /// Injectable process-launch boundary used by tests and alternate runtimes.
@@ -257,74 +257,93 @@ impl UpstreamLauncher for ProcessUpstreamLauncher {
         };
 
         Ok(Box::new(ProcessUpstreamSession {
-            child,
-            stdin: Some(BufWriter::new(stdin)),
-            stdout: BufReader::new(stdout),
+            child: Mutex::new(child),
+            stdin: Mutex::new(Some(BufWriter::new(stdin))),
+            stdout: Mutex::new(BufReader::new(stdout)),
         }))
     }
 }
 
 struct ProcessUpstreamSession {
-    child: Child,
-    stdin: Option<BufWriter<ChildStdin>>,
-    stdout: BufReader<ChildStdout>,
+    child: Mutex<Child>,
+    stdin: Mutex<Option<BufWriter<ChildStdin>>>,
+    stdout: Mutex<BufReader<ChildStdout>>,
 }
 
 impl UpstreamProcess for ProcessUpstreamSession {
-    fn send(&mut self, message: &str) -> Result<String, UpstreamProcessError> {
+    fn send(&self, message: &str) -> Result<String, UpstreamProcessError> {
         if !self.is_alive() {
             return Err(UpstreamProcessError::Exited);
         }
         self.write_message(message)?;
+        let expected_id = serde_json::from_str::<serde_json::Value>(message)
+            .ok()
+            .and_then(|value| value.get("id").cloned());
+        let expected_id = expected_id.ok_or(UpstreamProcessError::InvalidResponse)?;
 
-        let mut response = String::new();
-        let bytes = self
-            .stdout
-            .read_line(&mut response)
-            .map_err(|_| UpstreamProcessError::Io)?;
-        if bytes == 0 {
-            return Err(UpstreamProcessError::Exited);
+        let mut stdout = self.stdout.lock().map_err(|_| UpstreamProcessError::Io)?;
+        loop {
+            let mut response = String::new();
+            let bytes = stdout
+                .read_line(&mut response)
+                .map_err(|_| UpstreamProcessError::Io)?;
+            if bytes == 0 {
+                return Err(UpstreamProcessError::Exited);
+            }
+            let response_text = response.trim_end_matches(['\r', '\n']);
+            if response_matches_id(response_text, &expected_id)? {
+                return Ok(response_text.to_owned());
+            }
+            // Notifications and server requests may be interleaved with a
+            // response. They are consumed here so they cannot become the
+            // response to the wrong request or corrupt the next exchange.
         }
-        let response = response.trim_end_matches(['\r', '\n']);
-        if response.is_empty() {
-            return Err(UpstreamProcessError::InvalidResponse);
-        }
-        Ok(response.to_owned())
     }
 
-    fn notify(&mut self, message: &str) -> Result<(), UpstreamProcessError> {
+    fn notify(&self, message: &str) -> Result<(), UpstreamProcessError> {
         if !self.is_alive() {
             return Err(UpstreamProcessError::Exited);
         }
         self.write_message(message)
     }
 
-    fn is_alive(&mut self) -> bool {
+    fn is_alive(&self) -> bool {
         self.child
-            .try_wait()
-            .map(|status| status.is_none())
+            .lock()
+            .ok()
+            .and_then(|mut child| child.try_wait().map(|status| status.is_none()).ok())
             .unwrap_or(false)
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&self) {
         // Closing stdin gives a well-behaved stdio server a chance to exit.
-        self.stdin.take();
+        if let Ok(mut stdin) = self.stdin.lock() {
+            stdin.take();
+        }
         let started = Instant::now();
         while started.elapsed() < SHUTDOWN_TIMEOUT {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) => thread::sleep(Duration::from_millis(10)),
-                Err(_) => break,
+            match self
+                .child
+                .lock()
+                .ok()
+                .and_then(|mut child| child.try_wait().ok())
+            {
+                Some(Some(_)) => return,
+                Some(None) => thread::sleep(Duration::from_millis(10)),
+                None => break,
             }
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
 impl ProcessUpstreamSession {
-    fn write_message(&mut self, message: &str) -> Result<(), UpstreamProcessError> {
-        let stdin = self.stdin.as_mut().ok_or(UpstreamProcessError::Exited)?;
+    fn write_message(&self, message: &str) -> Result<(), UpstreamProcessError> {
+        let mut stdin_guard = self.stdin.lock().map_err(|_| UpstreamProcessError::Io)?;
+        let stdin = stdin_guard.as_mut().ok_or(UpstreamProcessError::Exited)?;
         stdin
             .write_all(message.as_bytes())
             .map_err(|_| UpstreamProcessError::Io)?;
@@ -335,6 +354,15 @@ impl ProcessUpstreamSession {
         }
         stdin.flush().map_err(|_| UpstreamProcessError::Io)
     }
+}
+
+fn response_matches_id(
+    response: &str,
+    expected_id: &serde_json::Value,
+) -> Result<bool, UpstreamProcessError> {
+    let value = serde_json::from_str::<serde_json::Value>(response)
+        .map_err(|_| UpstreamProcessError::InvalidResponse)?;
+    Ok(value.get("id") == Some(expected_id))
 }
 
 impl Drop for ProcessUpstreamSession {
@@ -386,7 +414,8 @@ impl std::error::Error for UpstreamError {
 
 struct ManagedSession {
     credential: CredentialRef,
-    process: Option<Box<dyn UpstreamProcess>>,
+    process: Option<Arc<dyn UpstreamProcess>>,
+    request_lock: Arc<Mutex<()>>,
 }
 
 /// Lazily creates and caches one upstream session per configured profile.
@@ -429,7 +458,7 @@ impl<C, L> UpstreamSessionManager<C, L> {
                     .lock()
                     .expect("session lock poisoned")
                     .process
-                    .as_mut()
+                    .as_ref()
                     .is_some_and(|process| process.is_alive()),
             })
             .collect()
@@ -464,19 +493,71 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         credential: &CredentialRef,
         message: &str,
     ) -> Result<String, UpstreamError> {
+        self.send_with_startup(profile, credential, message, |_| Ok(()))
+    }
+
+    /// Send a request, running `startup` only when a new child process had to
+    /// be created. This lets protocol owners re-run their handshake after a
+    /// process restart without retrying the original request implicitly.
+    pub fn send_with_startup<F>(
+        &self,
+        profile: impl Into<String>,
+        credential: &CredentialRef,
+        message: &str,
+        startup: F,
+    ) -> Result<String, UpstreamError>
+    where
+        F: FnOnce(&dyn UpstreamProcess) -> Result<(), UpstreamProcessError>,
+    {
         let profile = profile.into();
         let session = self.session_for(&profile, credential)?;
-        let mut session = session.lock().expect("session lock poisoned");
-        self.ensure_process(&mut session)?;
-        let result = session
-            .process
-            .as_mut()
-            .expect("ensure_process installs a process")
-            .send(message);
+        let request_lock = session
+            .lock()
+            .expect("session lock poisoned")
+            .request_lock
+            .clone();
+        let _request_guard = request_lock.lock().expect("request lock poisoned");
+
+        let (session, started) = {
+            let mut session = session.lock().expect("session lock poisoned");
+            let started = self.ensure_process(&mut session)?;
+            let process = session
+                .process
+                .as_ref()
+                .expect("ensure_process installs a process")
+                .clone();
+            (process, started)
+        };
+        if started {
+            if let Err(error) = startup(session.as_ref()) {
+                let sessions = self.sessions.lock().expect("session map lock poisoned");
+                if let Some(managed) = sessions.get(&profile) {
+                    managed
+                        .lock()
+                        .expect("session lock poisoned")
+                        .process
+                        .take();
+                }
+                return Err(UpstreamError::Process(error));
+            }
+        }
+        let result = session.send(message);
         match result {
             Ok(response) => Ok(response),
             Err(error) => {
-                session.process.take();
+                let managed = self
+                    .sessions
+                    .lock()
+                    .expect("session map lock poisoned")
+                    .get(&profile)
+                    .cloned();
+                if let Some(managed) = managed {
+                    managed
+                        .lock()
+                        .expect("session lock poisoned")
+                        .process
+                        .take();
+                }
                 Err(UpstreamError::Process(error))
             }
         }
@@ -491,15 +572,25 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
     ) -> Result<(), UpstreamError> {
         let profile = profile.into();
         let session = self.session_for(&profile, credential)?;
-        let mut session = session.lock().expect("session lock poisoned");
-        self.ensure_process(&mut session)?;
-        let result = session
-            .process
-            .as_mut()
-            .expect("ensure_process installs a process")
-            .notify(message);
+        let process = {
+            let mut session = session.lock().expect("session lock poisoned");
+            self.ensure_process(&mut session)?;
+            session
+                .process
+                .as_ref()
+                .expect("ensure_process installs a process")
+                .clone()
+        };
+        let result = process.notify(message);
         if let Err(error) = result {
-            session.process.take();
+            let sessions = self.sessions.lock().expect("session map lock poisoned");
+            if let Some(session) = sessions.get(&profile) {
+                session
+                    .lock()
+                    .expect("session lock poisoned")
+                    .process
+                    .take();
+            }
             return Err(UpstreamError::Process(error));
         }
         Ok(())
@@ -536,18 +627,19 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
         let session = Arc::new(Mutex::new(ManagedSession {
             credential: credential.clone(),
             process: None,
+            request_lock: Arc::new(Mutex::new(())),
         }));
         sessions.insert(profile.to_owned(), Arc::clone(&session));
         Ok(session)
     }
 
-    fn ensure_process(&self, session: &mut ManagedSession) -> Result<(), UpstreamError> {
+    fn ensure_process(&self, session: &mut ManagedSession) -> Result<bool, UpstreamError> {
         if session
             .process
-            .as_mut()
+            .as_ref()
             .is_some_and(|process| process.is_alive())
         {
-            return Ok(());
+            return Ok(false);
         }
         session.process.take();
 
@@ -560,12 +652,12 @@ impl<C: CredentialProvider + Send + Sync, L: UpstreamLauncher> UpstreamSessionMa
             args: self.config.args.clone(),
             environment: UpstreamEnvironment::for_credential(&session.credential, secret),
         };
-        session.process = Some(
+        session.process = Some(Arc::from(
             self.launcher
                 .launch(request)
                 .map_err(UpstreamError::Launch)?,
-        );
-        Ok(())
+        ));
+        Ok(true)
     }
 }
 
@@ -630,30 +722,30 @@ mod tests {
     }
 
     struct FakeProcess {
-        alive: bool,
+        alive: AtomicBool,
         fail_next_send: Arc<AtomicBool>,
         shutdowns: Arc<AtomicUsize>,
     }
 
     impl UpstreamProcess for FakeProcess {
-        fn send(&mut self, message: &str) -> Result<String, UpstreamProcessError> {
+        fn send(&self, message: &str) -> Result<String, UpstreamProcessError> {
             if self.fail_next_send.swap(false, Ordering::SeqCst) {
-                self.alive = false;
+                self.alive.store(false, Ordering::SeqCst);
                 return Err(UpstreamProcessError::Io);
             }
             Ok(format!(r#"{{"jsonrpc":"2.0","result":"{message}"}}"#))
         }
 
-        fn notify(&mut self, _message: &str) -> Result<(), UpstreamProcessError> {
+        fn notify(&self, _message: &str) -> Result<(), UpstreamProcessError> {
             Ok(())
         }
 
-        fn is_alive(&mut self) -> bool {
-            self.alive
+        fn is_alive(&self) -> bool {
+            self.alive.load(Ordering::SeqCst)
         }
 
-        fn shutdown(&mut self) {
-            self.alive = false;
+        fn shutdown(&self) {
+            self.alive.store(false, Ordering::SeqCst);
             self.shutdowns.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -685,7 +777,7 @@ mod tests {
             self.requests.lock().unwrap().push(request);
             self.launches.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeProcess {
-                alive: true,
+                alive: AtomicBool::new(true),
                 fail_next_send: Arc::clone(&self.fail_next_send),
                 shutdowns: Arc::clone(&self.shutdowns),
             }))
@@ -787,6 +879,26 @@ mod tests {
     }
 
     #[test]
+    fn startup_hook_reinitializes_a_restarted_process_before_the_next_request() {
+        let (manager, launcher) = manager();
+        let credential = reference("personal");
+        manager.send("personal", &credential, "initial").unwrap();
+        launcher.fail_next_send.store(true, Ordering::SeqCst);
+        assert!(manager.send("personal", &credential, "failed").is_err());
+
+        let startup_runs = Arc::new(AtomicUsize::new(0));
+        let startup_runs_for_hook = Arc::clone(&startup_runs);
+        manager
+            .send_with_startup("personal", &credential, "after-restart", move |process| {
+                startup_runs_for_hook.fetch_add(1, Ordering::SeqCst);
+                process.notify(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            })
+            .unwrap();
+        assert_eq!(startup_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn profile_cannot_be_rebound_to_a_different_credential_reference() {
         let (manager, _launcher) = manager();
         manager.start("personal", &reference("personal")).unwrap();
@@ -837,5 +949,20 @@ mod tests {
         };
         assert!(matches!(error, UpstreamLaunchError::BinaryNotFound { .. }));
         assert!(!error.to_string().contains("ghp_SYNTHETIC"));
+    }
+
+    #[test]
+    fn response_demultiplexing_skips_notifications_until_the_expected_id() {
+        let expected_id = serde_json::json!(7);
+        assert!(!response_matches_id(
+            r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{}}"#,
+            &expected_id
+        )
+        .unwrap());
+        assert!(response_matches_id(
+            r#"{"jsonrpc":"2.0","id":7,"result":{}}"#,
+            &expected_id
+        )
+        .unwrap());
     }
 }

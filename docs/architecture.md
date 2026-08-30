@@ -16,7 +16,9 @@ The v0.1 client transport is JSON-RPC 2.0 over newline-delimited stdio. The
 router forwards the official upstream MCP protocol version and capabilities;
 it does not advertise a separate GitHub tool schema. Profile sessions are
 validated during initialization before the client receives the public tool
-surface.
+surface. If the client advertises the roots capability, the proxy requests
+`roots/list` after initialization and uses exactly one returned file root for
+workspace context; multiple roots are treated as ambiguous.
 
 ```text
 MCP Client
@@ -39,9 +41,10 @@ GitHub
 The configuration boundary parses and validates profiles and ordered route rules
 before later services start. Credential providers resolve account references,
 while discovery, routing evaluation, upstream sessions, and MCP forwarding
-remain separate concerns. The MCP proxy forwards upstream lifecycle and
-capability messages, derives one public tool surface after validating every
-profile's tool schema, and routes only repository-scoped `tools/call` requests.
+remain separate concerns. The MCP proxy completes each upstream handshake
+before discovery, forwards lifecycle and capability messages, derives one
+public tool surface after validating every profile's tool schema, and routes
+only repository-scoped `tools/call` requests.
 
 ## Module responsibilities
 

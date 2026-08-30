@@ -50,7 +50,14 @@ pub struct ProfileConfig {
 
 impl ProfileConfig {
     pub fn credential_ref(&self) -> CredentialRef {
-        CredentialRef::new(self.provider.clone(), self.user.clone())
+        let mut reference = CredentialRef::new(self.provider.clone(), self.user.clone());
+        if let Some(host) = &self.host {
+            reference = reference.with_host(host.clone());
+        }
+        if let Some(config_dir) = &self.gh_config_dir {
+            reference = reference.with_gh_config_dir(config_dir.clone());
+        }
+        reference
     }
 
     pub fn expanded_gh_config_dir(&self) -> Result<Option<PathBuf>, ConfigError> {
@@ -608,6 +615,21 @@ mod tests {
             AmbiguityPolicy::DefaultProfile
         );
         assert_eq!(config.ambiguity_policy.write, AmbiguityPolicy::Error);
+    }
+
+    #[test]
+    fn profile_credential_reference_preserves_non_secret_host_and_config_metadata() {
+        let config = Config::from_yaml_str(
+            "profiles:\n  work:\n    provider: gh\n    user: work-account\n    host: github.example.com\n    gh_config_dir: ~/.config/gh-work\n",
+        )
+        .unwrap();
+
+        let reference = config.profiles["work"].credential_ref();
+
+        assert_eq!(reference.provider(), "gh");
+        assert_eq!(reference.name(), "work-account");
+        assert_eq!(reference.host(), Some("github.example.com"));
+        assert_eq!(reference.gh_config_dir(), Some("~/.config/gh-work"));
     }
 
     #[test]

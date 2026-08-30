@@ -30,12 +30,10 @@ Official GitHub MCP Server
 GitHub
 ```
 
-The configuration boundary parses and validates profiles and route rules before
-later services start. The routing boundary evaluates those rules by explicit
-specificity and returns explainable selected, no-match, or ambiguous results.
-Host, owner, and repository comparisons are case-insensitive while explanation
-metadata retains the configured spelling. Discovery, credential providers,
-upstream sessions, and MCP forwarding remain separate concerns.
+The configuration boundary parses and validates profiles and ordered route rules
+before later services start. Credential providers resolve account references,
+while discovery, routing evaluation, upstream sessions, and MCP forwarding
+remain separate concerns.
 
 ## Module responsibilities
 
@@ -43,9 +41,9 @@ upstream sessions, and MCP forwarding remain separate concerns.
 | --- | --- | --- |
 | `config` | Serializable profile/route models, parsing, path expansion, and validation | Credential retrieval or routing evaluation |
 | `context` | Normalized repository identity | Git remote or MCP root discovery |
-| `routing` | Pure, deterministic repository-to-profile evaluation | Credential retrieval, API calls, CLI state |
-| `credentials` | Credential references and provider interface | GitHub CLI discovery or token retrieval |
-| `security` | Secret-safe value formatting | Full lifecycle hardening and zeroization |
+| `routing` | Pure routing decision domain | Credential retrieval, API calls, CLI state |
+| `credentials` | Credential references, GitHub CLI account discovery, and token retrieval | Repository/profile routing or GitHub API calls |
+| `security` | Secret-safe formatting and `SecretString` cleanup | Full lifecycle hardening beyond value cleanup |
 | `mcp` | Client-facing protocol/proxy boundary | Repository routing policy |
 | `upstream` | Official GitHub MCP session boundary | GitHub API/tool implementation |
 | `cli` | Presentation and command dispatch | The routing engine itself |
@@ -76,13 +74,15 @@ capabilities rather than duplicate their definitions.
 - Routing must not depend on global `gh auth switch` state.
 - There is no global mutable current-account state.
 - Credential retrieval and routing decisions remain separate concerns.
-- Ordinary `Debug` and `Display` formatting of secret values must redact them.
+- Ordinary `Debug` and `Display` formatting of secret values must redact them;
+  subprocess output is never included in provider errors.
 - Ambiguous write operations will eventually fail closed rather than guess an
   identity.
 
-These are design principles. Routing evaluates only normalized repository
-context and profile references; it does not perform credential discovery,
-repository inference, or MCP proxying.
+These are design principles. The GitHub CLI provider performs account discovery
+and on-demand token retrieval through explicit subprocess arguments and
+profile-specific `GH_CONFIG_DIR` values. Repository inference, routing
+evaluation, and MCP proxying remain separate concerns.
 
 ## Planned feature ownership
 

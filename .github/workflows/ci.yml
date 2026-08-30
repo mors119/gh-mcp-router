@@ -8,9 +8,16 @@ on:
 permissions:
   contents: read
 
+env:
+  # The compatibility smoke is intentionally pinned so an upstream change is
+  # reviewed and reproduced instead of silently changing CI behavior.
+  GITHUB_MCP_SERVER_VERSION: v1.11.0
+  GITHUB_MCP_SERVER_ASSET: github-mcp-server_Linux_x86_64.tar.gz
+  GITHUB_MCP_SERVER_SHA256: 3b73bb7be0c8b043f861e90410df8ebdfc71b83128c54ced75fb32c4ff697fc5
+
 jobs:
-  check:
-    name: Check
+  verify:
+    name: Verify Rust project
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -24,8 +31,82 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Check compilation
-        run: cargo check --locked
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run complete test suite
+        run: cargo test --locked --all-features
+
+      - name: Run fake multi-profile integration matrix
+        run: cargo test --locked --all-features --test multi_profile_integration
+
+      - name: Verify debug build
+        run: cargo build --locked --all-features
+
+      - name: Verify package archive
+        run: cargo package --locked
+
+  platform:
+    name: Build and test ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - platform: macOS x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: macOS arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked --all-features --target ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+  audit:
+    name: Dependency advisory audit
+    runs-on: ubuntu-latest
+    # audit-check publishes a richer commit check when this permission is
+    # available. Fork pull requests receive a read-only token from GitHub; the
+    # action falls back to the job log for those events.
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Audit Rust dependencies
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  upstream-compatibility:
+    name: Check official upstream compatibility baseline
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download pinned upstream release
+        run: curl --fail --location --remote-name "https://github.com/github/github-mcp-server/releases/download/${GITHUB_MCP_SERVER_VERSION}/${GITHUB_MCP_SERVER_ASSET}"
+
+      - name: Verify upstream checksum
+        run: echo "${GITHUB_MCP_SERVER_SHA256}  ${GITHUB_MCP_SERVER_ASSET}" | sha256sum --check
+
+      - name: Smoke test upstream executable
+        run: |
+          tar --extract --gzip --file "${GITHUB_MCP_SERVER_ASSET}"
+          test -x github-mcp-server
+          ./github-mcp-server --help

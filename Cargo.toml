@@ -3,7 +3,12 @@ name = "gh-mcp-router"
 version = "0.1.0"
 edition = "2021"
 description = "A local-first identity and routing layer for the official GitHub MCP Server"
-license = "MIT"
+license = "Apache-2.0"
+repository = "https://github.com/mors119/gh-mcp-router"
+readme = "README.md"
+keywords = ["github", "mcp", "routing", "multi-account"]
+categories = ["command-line-utilities"]
+exclude = [".github/", "AGENTS.md", ".gitignore"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

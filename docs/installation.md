@@ -1,12 +1,25 @@
 # Installation and GitHub authentication
 
-This document describes the supported pre-release v0.1 installation path.
+This document describes the supported v0.1 installation paths.
 
 ## Availability
 
-There is currently no published `gh-mcp-router` crate on crates.io and no
-downloadable release binary. `cargo install gh-mcp-router` is therefore not a
-supported command yet. Build from a checked-out repository instead:
+The project is distributed as checksummed binaries from tagged GitHub Releases;
+`cargo install gh-mcp-router` from crates.io is not supported yet. Download the
+archive matching your platform from the release page, verify its sidecar
+checksum, and install the binary:
+
+```bash
+sha256sum --check gh-mcp-router-linux-x86_64.tar.gz.sha256
+tar -xzf gh-mcp-router-linux-x86_64.tar.gz
+install -m 755 gh-mcp-router "$HOME/.local/bin/gh-mcp-router"
+```
+
+On macOS, use `shasum -a 256 --check` and the x86_64 or arm64 archive matching
+the machine. See [compatibility.md](compatibility.md) for the complete support
+matrix.
+
+For development or unsupported targets, build from a checked-out repository:
 
 ```bash
 git clone https://github.com/mors119/gh-mcp-router.git

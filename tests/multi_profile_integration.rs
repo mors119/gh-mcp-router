@@ -323,6 +323,7 @@ fn profile(user: &str) -> ProfileConfig {
         user: user.to_owned(),
         gh_config_dir: None,
         host: None,
+        target: None,
     }
 }
 

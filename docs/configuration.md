@@ -17,6 +17,52 @@ missing repository context is never made safe by that policy: repository-free
 reads may use an explicit default, while writes and unknown operations require
 deterministic context. The safer default is to fail closed.
 
+## Execution targets
+
+The original flat profile form remains supported and derives a local `gh`
+execution target:
+
+```yaml
+profiles:
+  work:
+    provider: gh
+    user: work-user
+    host: github.com
+```
+
+GitHub App installations can be represented explicitly with the same profile
+and route engine:
+
+```yaml
+profiles:
+  example-app:
+    target:
+      type: github_app_installation
+      installation_id: 123456
+      account:
+        host: github.com
+        login: ExampleOrg
+      repository_grants:
+        - host: github.com
+          owner: ExampleOrg
+          repository: backend
+
+routes:
+  - match: { owner: ExampleOrg }
+    profile: example-app
+```
+
+Installation IDs, account metadata, and repository grants are credential-free
+routing metadata. GitHub is the source of truth for current grants,
+permissions, suspension, and revocation. The v0.1 `gh` credential provider and
+stdio upstream do not execute installation targets yet; `profiles` reports
+them as `unsupported`, while `serve` fails explicitly instead of trying to
+resolve an installation as a CLI user. Installation authentication and
+discovery are planned for Issues #38 and #39.
+
+Do not combine `target` with the legacy `provider`, `user`, `host`, or
+`gh_config_dir` fields. This prevents ambiguous identity interpretation.
+
 ## Personal and work accounts
 
 This is a complete two-account configuration using synthetic usernames and an

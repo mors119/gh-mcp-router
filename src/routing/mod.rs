@@ -2,14 +2,16 @@
 //!
 //! Routing consumes only normalized repository context and typed configuration.
 //! It does not retrieve credentials, execute subprocesses, call GitHub APIs,
-//! or know about MCP transport. A route selects a credential *profile*; a
-//! separate credential provider resolves that profile later.
+//! or know about MCP transport. A route selects a metadata-only execution
+//! target through a named *profile*; a separate credential provider resolves
+//! that target later.
 
 use std::fmt;
 
 use crate::{
     config::{Config, RouteRule},
     context::RepositoryContext,
+    identity::RoutingTarget,
 };
 
 /// Broad operation policy used by later request-routing features.
@@ -131,6 +133,11 @@ pub struct RoutingDecision {
     pub repository: String,
     /// The profile name to pass to the credential/session layers.
     pub selected_profile: String,
+    /// The credential-independent execution target attached to the selected
+    /// profile. A validated configuration always supplies this value; `None`
+    /// is retained only for callers that construct an invalid `Config`
+    /// directly instead of using configuration validation.
+    pub target: Option<RoutingTarget>,
     /// A human-readable description of the winning rule, or `None` for the
     /// configured default profile.
     pub matched_rule: Option<String>,
@@ -142,6 +149,10 @@ impl RoutingDecision {
     /// Return the selected profile without exposing or resolving credentials.
     pub fn profile(&self) -> &str {
         &self.selected_profile
+    }
+
+    pub fn target(&self) -> Option<&RoutingTarget> {
+        self.target.as_ref()
     }
 }
 
@@ -241,6 +252,13 @@ impl RoutingResult {
             Self::NoMatch(_) | Self::Ambiguous(_) => None,
         }
     }
+
+    pub fn selected_target(&self) -> Option<&RoutingTarget> {
+        match self {
+            Self::Selected(decision) => decision.target(),
+            Self::NoMatch(_) | Self::Ambiguous(_) => None,
+        }
+    }
 }
 
 /// Pure evaluator for a validated configuration.
@@ -336,6 +354,10 @@ pub fn evaluate(config: &Config, context: &RepositoryContext) -> RoutingResult {
         return RoutingResult::Selected(RoutingDecision {
             repository,
             selected_profile: first.profile.clone(),
+            target: config
+                .profiles
+                .get(&first.profile)
+                .map(|profile| profile.routing_target()),
             matched_rule: Some(first.matched_rule.clone()),
             specificity,
             fallback_used: false,
@@ -346,6 +368,10 @@ pub fn evaluate(config: &Config, context: &RepositoryContext) -> RoutingResult {
         Some(profile) => RoutingResult::Selected(RoutingDecision {
             repository,
             selected_profile: profile.clone(),
+            target: config
+                .profiles
+                .get(profile)
+                .map(|profile| profile.routing_target()),
             matched_rule: None,
             specificity: RouteSpecificity::Default,
             fallback_used: true,
@@ -552,6 +578,7 @@ mod tests {
                         user: name.to_owned(),
                         gh_config_dir: None,
                         host: None,
+                        target: None,
                     },
                 )
             })
@@ -770,6 +797,34 @@ mod tests {
         let formatted = format!("{result:?}");
         assert!(!formatted.contains("ghp_"));
         assert!(!formatted.contains("github_pat_"));
+    }
+
+    #[test]
+    fn routing_decision_carries_an_installation_target_without_credentials() {
+        let mut config = config(vec![rule("app", Some("ExampleOrg/repo"), None, None)], None);
+        let target = RoutingTarget::github_app_installation(
+            crate::config::GitHubInstallationId::new(42),
+            crate::config::GitHubAccountRef::new("github.com", "ExampleOrg"),
+        );
+        config.profiles.insert(
+            "app".to_owned(),
+            ProfileConfig {
+                provider: String::new(),
+                user: String::new(),
+                gh_config_dir: None,
+                host: None,
+                target: Some(target.clone()),
+            },
+        );
+
+        let decision = selected(evaluate(
+            &config,
+            &context("github.com", "ExampleOrg", "repo"),
+        ));
+
+        assert_eq!(decision.target(), Some(&target));
+        assert_eq!(decision.target().unwrap().repository_grants(), &[]);
+        assert!(!format!("{decision:?}").contains("token"));
     }
 
     #[test]

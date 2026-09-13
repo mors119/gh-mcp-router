@@ -181,6 +181,7 @@ where
                 user: account.user,
                 gh_config_dir: None,
                 host: Some(account.host),
+                target: None,
             },
         );
     }
@@ -229,16 +230,39 @@ where
     let config = Config::load(path)?;
     let mut rows = Vec::new();
     for (name, profile) in &config.profiles {
-        let reference = profile.credential_ref();
-        let (user, auth) = match credentials.verify_account(&reference) {
-            Ok(account) => (account.user, "ok".to_owned()),
-            Err(error) => (profile.user.clone(), auth_status(&error).to_owned()),
+        let target = profile.routing_target();
+        let (user, host, provider, auth) = match profile.local_credential_ref() {
+            Ok(reference) => {
+                let (user, auth) = match credentials.verify_account(&reference) {
+                    Ok(account) => (account.user, "ok".to_owned()),
+                    Err(error) => (
+                        if profile.user.is_empty() {
+                            target.account().login().to_owned()
+                        } else {
+                            profile.user.clone()
+                        },
+                        auth_status(&error).to_owned(),
+                    ),
+                };
+                (
+                    user,
+                    reference.host().unwrap_or("github.com").to_owned(),
+                    reference.provider().to_owned(),
+                    auth,
+                )
+            }
+            Err(_) => (
+                target.account().login().to_owned(),
+                target.account().host().to_owned(),
+                target.kind().to_owned(),
+                "unsupported".to_owned(),
+            ),
         };
         rows.push(ProfileRow {
             profile: name.clone(),
             user,
-            host: reference.host().unwrap_or("github.com").to_owned(),
-            provider: reference.provider().to_owned(),
+            host,
+            provider,
             auth,
         });
     }
@@ -359,7 +383,17 @@ where
 
         let mut startup_profiles = Vec::new();
         for (name, profile) in &config.profiles {
-            let reference = profile.credential_ref();
+            let reference = match profile.local_credential_ref() {
+                Ok(reference) => reference,
+                Err(error) => {
+                    checks.push(Check {
+                        name: format!("profile:{name}:target"),
+                        status: "error".to_owned(),
+                        detail: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             let config_dir_ok = match profile.expanded_gh_config_dir() {
                 Ok(Some(dir)) => dir.is_dir(),
                 Ok(None) => true,
@@ -424,7 +458,9 @@ where
         if binary_ok && gh_ok {
             let manager = UpstreamSessionManager::new(credentials, launcher, upstream_config);
             for name in startup_profiles {
-                let reference = config.profiles[&name].credential_ref();
+                let reference = config.profiles[&name]
+                    .local_credential_ref()
+                    .map_err(|error| CliError::Routing(error.to_string()))?;
                 match probe_upstream(&manager, name.clone(), &reference) {
                     Ok(()) => checks.push(Check {
                         name: format!("profile:{name}:upstream"),
@@ -1550,6 +1586,7 @@ mod tests {
                         user: name.to_owned(),
                         gh_config_dir: None,
                         host: None,
+                        target: None,
                     },
                 )
             })

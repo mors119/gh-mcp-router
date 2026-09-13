@@ -41,7 +41,9 @@ GitHub
 The configuration boundary parses and validates profiles and ordered route rules
 before later services start. Credential providers resolve account references,
 while discovery, routing evaluation, upstream sessions, and MCP forwarding
-remain separate concerns. The MCP proxy completes each upstream handshake
+remain separate concerns. The identity model now represents both local `gh`
+targets and GitHub App installation targets without putting credentials in
+routing. The MCP proxy completes each upstream handshake
 before discovery, forwards lifecycle and capability messages, derives one
 public tool surface after validating every profile's tool schema, and routes
 only repository-scoped `tools/call` requests.
@@ -52,6 +54,7 @@ only repository-scoped `tools/call` requests.
 | --- | --- | --- |
 | `config` | Serializable profile/route models, parsing, path expansion, and validation | Credential retrieval or routing evaluation |
 | `context` | Request-scoped repository resolution, normalization, and source metadata | Credential retrieval, routing policy, GitHub API calls |
+| `identity` | Metadata-only client, router, GitHub account, installation, credential-source, and upstream-identity values | Authentication, token storage, GitHub API calls |
 | `routing` | Pure routing decisions, operation classification, and safe fallback policy | Credential retrieval, API calls, CLI state |
 | `credentials` | Credential references, GitHub CLI account discovery, and token retrieval | Repository/profile routing or GitHub API calls |
 | `security` | Secret-safe formatting, cancellation, child-environment allowlisting, and redacting observability | GitHub credential retrieval or public multi-tenant secret brokering |
@@ -61,8 +64,10 @@ only repository-scoped `tools/call` requests.
 
 The project remains a single crate until a real boundary justifies splitting
 it. Domain values are intentionally small and can be constructed independently
-for unit tests. Profiles refer to `CredentialRef` values; no domain type needs
-a plaintext token.
+for unit tests. Legacy profiles derive a `RoutingTarget::LocalGh`; explicit
+installation targets carry only installation/account/grant metadata. No domain
+type needs a plaintext token. The identity decision and source-of-truth
+boundary are recorded in [ADR-0001](adr/0001-local-and-installation-identity-targets.md).
 
 ## Upstream boundary and non-goals
 
@@ -78,7 +83,7 @@ The router intentionally does **not** implement or replace the following:
 Those capabilities remain responsibilities of the official GitHub MCP Server.
 The upstream process/session boundary forwards or isolates those capabilities
 rather than duplicate their definitions. It maintains one lazily started stdio
-child per profile, binds each child permanently to its credential reference,
+child per local profile, binds each child permanently to its credential reference,
 passes the resolved credential only in the child environment, and restarts a
 failed child on the next request without retrying the failed message.
 
@@ -88,6 +93,10 @@ failed child on the next request without retrying the failed message.
 - Routing must not depend on global `gh auth switch` state.
 - There is no global mutable current-account state.
 - Credential retrieval and routing decisions remain separate concerns.
+- Client principals, router principals, GitHub accounts, GitHub App
+  installations, credential sources, and upstream identities are separate
+  typed metadata values. A client principal is never used as an installation
+  ID or GitHub account.
 - Ordinary `Debug` and `Display` formatting of secret values must redact them;
   subprocess output is never included in provider errors.
 - Ambiguous write operations fail closed rather than guess an identity.
@@ -150,6 +159,11 @@ The next features add behavior behind the boundaries established here:
 - MCP request forwarding (`#8`, implemented)
 - complete CLI workflows (`#9`, implemented)
 - deeper secret, concurrency, logging, and process hardening (`#10`, implemented)
+
+Issue #37 adds the identity foundation: local targets remain implemented, and
+installation targets are representable and routable as metadata. Installation
+discovery, token lifecycle, and installation-backed upstream execution remain
+planned in Issues #38 onward.
 
 ## CLI boundary
 

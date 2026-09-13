@@ -14,22 +14,45 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
-use crate::credentials::CredentialRef;
+use crate::credentials::{CredentialRef, DEFAULT_GITHUB_HOST};
 use crate::security::redact_sensitive_text;
 
-/// A named GitHub identity configuration used by domain callers.
+pub use crate::identity::{
+    ClientPrincipalRef, CredentialProviderId, CredentialSource, GitHubAccountRef,
+    GitHubInstallationId, RepositoryGrant, RouterPrincipalRef, RoutingTarget, UpstreamIdentity,
+};
+
+/// A named GitHub execution target used by domain callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
     pub name: String,
-    pub credential: CredentialRef,
+    pub target: RoutingTarget,
 }
 
 impl Profile {
     pub fn new(name: impl Into<String>, credential: CredentialRef) -> Self {
         Self {
             name: name.into(),
-            credential,
+            target: RoutingTarget::local_gh(
+                credential.provider().to_owned(),
+                GitHubAccountRef::new(
+                    credential.host().unwrap_or(DEFAULT_GITHUB_HOST),
+                    credential.name(),
+                ),
+                credential.gh_config_dir().map(str::to_owned),
+            ),
         }
+    }
+
+    pub fn from_target(name: impl Into<String>, target: RoutingTarget) -> Self {
+        Self {
+            name: name.into(),
+            target,
+        }
+    }
+
+    pub fn target(&self) -> &RoutingTarget {
+        &self.target
     }
 }
 
@@ -38,8 +61,10 @@ impl Profile {
 #[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     /// Credential provider identifier, for example `gh`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provider: String,
     /// Provider account or username reference.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub user: String,
     /// Optional isolated GitHub CLI configuration directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,24 +72,96 @@ pub struct ProfileConfig {
     /// GitHub host, defaulting to `github.com`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// Explicit credential-independent execution target.
+    ///
+    /// When omitted, the legacy `provider`/`user` fields are interpreted as a
+    /// local `gh`-style target. The explicit form is required for installation
+    /// targets and keeps future providers from being encoded as fake users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<RoutingTarget>,
 }
 
 impl ProfileConfig {
+    /// Resolve the profile's metadata-only execution target.
+    pub fn routing_target(&self) -> RoutingTarget {
+        self.target.clone().unwrap_or_else(|| {
+            RoutingTarget::local_gh(
+                self.provider.clone(),
+                GitHubAccountRef::new(
+                    self.host.as_deref().unwrap_or(DEFAULT_GITHUB_HOST),
+                    self.user.clone(),
+                ),
+                self.gh_config_dir.clone(),
+            )
+        })
+    }
+
+    /// Build a provider-specific reference only for a local target.
+    pub fn local_credential_ref(&self) -> Result<CredentialRef, ProfileTargetError> {
+        let target = self.routing_target();
+        match target {
+            RoutingTarget::LocalGh {
+                provider,
+                account,
+                gh_config_dir,
+            } => {
+                let mut reference = CredentialRef::new(provider.as_str(), account.login());
+                if account.host() != DEFAULT_GITHUB_HOST
+                    || self.host.is_some()
+                    || self.target.is_some()
+                {
+                    reference = reference.with_host(account.host().to_owned());
+                }
+                if let Some(config_dir) = gh_config_dir {
+                    reference = reference.with_gh_config_dir(config_dir);
+                }
+                Ok(reference)
+            }
+            RoutingTarget::GitHubAppInstallation { .. } => {
+                Err(ProfileTargetError::UnsupportedCredentialSource {
+                    target: "github_app_installation",
+                })
+            }
+        }
+    }
+
+    /// Backward-compatible local-profile helper.
+    ///
+    /// New code that may receive an installation target must use
+    /// [`Self::local_credential_ref`] and handle the unsupported target
+    /// explicitly.
     pub fn credential_ref(&self) -> CredentialRef {
-        let mut reference = CredentialRef::new(self.provider.clone(), self.user.clone());
-        if let Some(host) = &self.host {
-            reference = reference.with_host(host.clone());
-        }
-        if let Some(config_dir) = &self.gh_config_dir {
-            reference = reference.with_gh_config_dir(config_dir.clone());
-        }
-        reference
+        self.local_credential_ref()
+            .expect("credential_ref is only available for a local profile target")
     }
 
     pub fn expanded_gh_config_dir(&self) -> Result<Option<PathBuf>, ConfigError> {
-        self.gh_config_dir.as_deref().map(expand_path).transpose()
+        let path = match self.routing_target() {
+            RoutingTarget::LocalGh { gh_config_dir, .. } => gh_config_dir,
+            RoutingTarget::GitHubAppInstallation { .. } => None,
+        };
+        path.as_deref().map(expand_path).transpose()
     }
 }
+
+/// A profile target that the current local credential provider cannot resolve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileTargetError {
+    UnsupportedCredentialSource { target: &'static str },
+}
+
+impl fmt::Display for ProfileTargetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedCredentialSource { target } => write!(
+                formatter,
+                "profile target '{target}' requires a credential provider that is not implemented"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProfileTargetError {}
 
 /// A route match. At least one field must be set.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,24 +399,38 @@ impl Config {
         }
         for (name, profile) in &self.profiles {
             validate_name(name, &format!("profiles.{name}"))?;
-            if profile.provider.trim().is_empty() {
-                return Err(ConfigError::validation(
-                    format!("profiles.{name}.provider"),
-                    "must not be empty",
-                ));
-            }
-            if profile.user.trim().is_empty() {
-                return Err(ConfigError::validation(
-                    format!("profiles.{name}.user"),
-                    "must not be empty",
-                ));
-            }
-            if let Some(host) = &profile.host {
-                validate_host(host, &format!("profiles.{name}.host"))?;
-            }
-            if profile.gh_config_dir.is_some() {
-                if let Err(error) = profile.expanded_gh_config_dir() {
-                    return Err(error.at_path(format!("profiles.{name}.gh_config_dir")));
+            if let Some(target) = &profile.target {
+                if !profile.provider.is_empty()
+                    || !profile.user.is_empty()
+                    || profile.gh_config_dir.is_some()
+                    || profile.host.is_some()
+                {
+                    return Err(ConfigError::validation(
+                        format!("profiles.{name}"),
+                        "explicit target cannot be combined with legacy provider, user, host, or gh_config_dir fields",
+                    ));
+                }
+                validate_target(target, &format!("profiles.{name}.target"))?;
+            } else {
+                if profile.provider.trim().is_empty() {
+                    return Err(ConfigError::validation(
+                        format!("profiles.{name}.provider"),
+                        "must not be empty",
+                    ));
+                }
+                if profile.user.trim().is_empty() {
+                    return Err(ConfigError::validation(
+                        format!("profiles.{name}.user"),
+                        "must not be empty",
+                    ));
+                }
+                if let Some(host) = &profile.host {
+                    validate_host(host, &format!("profiles.{name}.host"))?;
+                }
+                if profile.gh_config_dir.is_some() {
+                    if let Err(error) = profile.expanded_gh_config_dir() {
+                        return Err(error.at_path(format!("profiles.{name}.gh_config_dir")));
+                    }
                 }
             }
         }
@@ -366,6 +477,68 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn validate_target(target: &RoutingTarget, path: &str) -> Result<(), ConfigError> {
+    match target {
+        RoutingTarget::LocalGh {
+            provider,
+            account,
+            gh_config_dir,
+        } => {
+            if provider.as_str().trim().is_empty() {
+                return Err(ConfigError::validation(
+                    format!("{path}.provider"),
+                    "must not be empty",
+                ));
+            }
+            validate_account(account, &format!("{path}.account"))?;
+            if let Some(config_dir) = gh_config_dir {
+                expand_path(config_dir)
+                    .map_err(|error| error.at_path(format!("{path}.gh_config_dir")))?;
+            }
+        }
+        RoutingTarget::GitHubAppInstallation {
+            installation_id,
+            account,
+            repository_grants,
+        } => {
+            if installation_id.value() == 0 {
+                return Err(ConfigError::validation(
+                    format!("{path}.installation_id"),
+                    "must be greater than zero",
+                ));
+            }
+            validate_account(account, &format!("{path}.account"))?;
+            for (index, grant) in repository_grants.iter().enumerate() {
+                let grant_path = format!("{path}.repository_grants[{index}]");
+                validate_host(&grant.host, &format!("{grant_path}.host"))?;
+                validate_name(&grant.owner, &format!("{grant_path}.owner"))?;
+                validate_repository_name(&grant.repository, &format!("{grant_path}.repository"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_account(account: &GitHubAccountRef, path: &str) -> Result<(), ConfigError> {
+    validate_host(&account.host, &format!("{path}.host"))?;
+    validate_name(&account.login, &format!("{path}.login"))
+}
+
+fn validate_repository_name(value: &str, path: &str) -> Result<(), ConfigError> {
+    if value.is_empty()
+        || value.len() > 100
+        || value
+            .chars()
+            .any(|character| !(character.is_ascii_alphanumeric() || "-_.".contains(character)))
+    {
+        return Err(ConfigError::validation(
+            path,
+            "must contain only ASCII letters, numbers, '-', '_' or '.'",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_name(value: &str, path: &str) -> Result<(), ConfigError> {
@@ -603,7 +776,11 @@ mod tests {
     fn profile_references_credentials_without_containing_a_token() {
         let profile = Profile::new("work", CredentialRef::new("gh", "work-account"));
         assert_eq!(profile.name, "work");
-        assert_eq!(profile.credential.provider(), "gh");
+        assert!(matches!(
+            profile.target(),
+            RoutingTarget::LocalGh { provider, account, .. }
+                if provider.as_str() == "gh" && account.login() == "work-account"
+        ));
     }
 
     #[test]
@@ -708,5 +885,58 @@ mod tests {
         assert!(config.profiles.contains_key("work"));
         let error = Config::from_yaml_str("profiles:\n  work:\n    provider: gh\n    user: work\n    gh_config_dir: ~other/.config/gh-work\n").unwrap_err();
         assert!(error.to_string().contains("profiles.work.gh_config_dir"));
+    }
+
+    #[test]
+    fn legacy_profile_configuration_derives_a_local_target() {
+        let config =
+            Config::from_yaml_str("profiles:\n  work:\n    provider: gh\n    user: work-account\n")
+                .unwrap();
+
+        let target = config.profiles["work"].routing_target();
+        assert!(matches!(
+            target,
+            RoutingTarget::LocalGh { provider, account, .. }
+                if provider.as_str() == "gh"
+                    && account.host() == "github.com"
+                    && account.login() == "work-account"
+        ));
+    }
+
+    #[test]
+    fn installation_target_is_configurable_without_credentials() {
+        let config = Config::from_yaml_str(
+            "profiles:\n  example-app:\n    target:\n      type: github_app_installation\n      installation_id: 12345\n      account:\n        host: github.com\n        login: ExampleOrg\n      repository_grants:\n        - host: github.com\n          owner: ExampleOrg\n          repository: backend\nroutes:\n  - match: { owner: ExampleOrg }\n    profile: example-app\n",
+        )
+        .unwrap();
+
+        let target = config.profiles["example-app"].routing_target();
+        assert!(matches!(
+            target,
+            RoutingTarget::GitHubAppInstallation {
+                installation_id,
+                account,
+                repository_grants,
+            } if installation_id.value() == 12345
+                && account.login() == "ExampleOrg"
+                && repository_grants.len() == 1
+        ));
+        assert!(config.profiles["example-app"]
+            .local_credential_ref()
+            .is_err());
+
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(serialized.contains("github_app_installation"));
+        assert!(!serialized.contains("token"));
+        assert!(!serialized.contains("private_key"));
+    }
+
+    #[test]
+    fn explicit_target_cannot_be_ambiguous_with_legacy_profile_fields() {
+        let error = Config::from_yaml_str(
+            "profiles:\n  example-app:\n    provider: gh\n    target:\n      type: github_app_installation\n      installation_id: 12345\n      account: { host: github.com, login: ExampleOrg }\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot be combined"));
     }
 }

@@ -79,6 +79,7 @@ pub enum McpError {
     Routing(SafeRoutingError),
     Upstream(UpstreamError),
     UnknownProfile(String),
+    UnsupportedTarget { profile: String, target: String },
     ToolSchemaMismatch { profile: String },
     InvalidUpstreamResponse,
     Io(io::Error),
@@ -95,6 +96,10 @@ impl fmt::Display for McpError {
             Self::UnknownProfile(profile) => {
                 write!(formatter, "configured profile '{profile}' was not found")
             }
+            Self::UnsupportedTarget { profile, target } => write!(
+                formatter,
+                "profile '{profile}' uses target '{target}', which has no local credential provider yet"
+            ),
             Self::ToolSchemaMismatch { profile } => write!(
                 formatter,
                 "upstream profile '{profile}' exposes a tool schema incompatible with the public MCP surface"
@@ -376,8 +381,8 @@ where
         let mut primary_response = None;
         let mut primary_tools = None;
         let mut primary_tools_response = None;
-        for (profile, profile_config) in &self.config.profiles {
-            let credential = profile_config.credential_ref();
+        for profile in self.config.profiles.keys() {
+            let credential = self.profile_credential(profile)?;
             let response = self.upstream.send(profile, &credential, raw_message)?;
             validate_json_response(&response)?;
             if response_has_error(&response) {
@@ -662,8 +667,15 @@ where
         self.config
             .profiles
             .get(profile)
-            .map(|profile| profile.credential_ref())
             .ok_or_else(|| McpError::UnknownProfile(profile.to_owned()))
+            .and_then(|profile_config| {
+                profile_config
+                    .local_credential_ref()
+                    .map_err(|_| McpError::UnsupportedTarget {
+                        profile: profile.to_owned(),
+                        target: profile_config.routing_target().kind().to_owned(),
+                    })
+            })
     }
 
     fn send_profile(
@@ -806,7 +818,9 @@ fn error_code(error: &McpError) -> i64 {
     match error {
         McpError::InvalidRequest(_) | McpError::NotInitialized => -32600,
         McpError::Context(_) | McpError::Routing(_) => -32001,
-        McpError::ToolSchemaMismatch { .. } | McpError::InvalidUpstreamResponse => -32002,
+        McpError::ToolSchemaMismatch { .. }
+        | McpError::InvalidUpstreamResponse
+        | McpError::UnsupportedTarget { .. } => -32002,
         McpError::Upstream(_) => -32003,
         McpError::UnknownProfile(_) => -32004,
         McpError::Io(_) => -32603,
@@ -981,6 +995,7 @@ mod tests {
                 user: "personal".to_owned(),
                 gh_config_dir: None,
                 host: None,
+                target: None,
             },
         );
         profiles.insert(
@@ -990,6 +1005,7 @@ mod tests {
                 user: "work".to_owned(),
                 gh_config_dir: None,
                 host: None,
+                target: None,
             },
         );
         let mut personal = RouteRule::for_profile("personal");

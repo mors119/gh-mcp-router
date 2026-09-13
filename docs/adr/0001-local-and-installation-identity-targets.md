@@ -54,6 +54,11 @@ only local targets. An installation target is represented and selected, then
 fails explicitly at the local credential boundary until the installation
 provider is implemented by Issues #38 and #39.
 
+Installation identity views retain the GitHub host alongside the installation
+ID. This prevents an Enterprise installation from colliding with a same-ID
+installation on another host and preserves the endpoint needed by a future
+provider and upstream session.
+
 ## Source of truth
 
 | Data | Source of truth | Local representation |

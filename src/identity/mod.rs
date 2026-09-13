@@ -158,6 +158,8 @@ pub enum CredentialSource {
     },
     #[serde(rename = "github_app_installation")]
     GitHubAppInstallation {
+        /// GitHub host scopes installation IDs and selects the token endpoint.
+        host: String,
         installation_id: GitHubInstallationId,
     },
 }
@@ -174,6 +176,8 @@ pub enum UpstreamIdentity {
     },
     #[serde(rename = "github_app_installation")]
     GitHubAppInstallation {
+        /// GitHub host scopes installation IDs and the upstream endpoint.
+        host: String,
         installation_id: GitHubInstallationId,
     },
 }
@@ -250,8 +254,11 @@ impl RoutingTarget {
                 gh_config_dir: gh_config_dir.clone(),
             },
             Self::GitHubAppInstallation {
-                installation_id, ..
+                installation_id,
+                account,
+                ..
             } => CredentialSource::GitHubAppInstallation {
+                host: account.host().to_owned(),
                 installation_id: *installation_id,
             },
         }
@@ -263,8 +270,11 @@ impl RoutingTarget {
                 account: account.clone(),
             },
             Self::GitHubAppInstallation {
-                installation_id, ..
+                installation_id,
+                account,
+                ..
             } => UpstreamIdentity::GitHubAppInstallation {
+                host: account.host().to_owned(),
                 installation_id: *installation_id,
             },
         }
@@ -304,14 +314,36 @@ mod tests {
         assert_eq!(
             target.credential_source(),
             CredentialSource::GitHubAppInstallation {
+                host: "github.com".to_owned(),
                 installation_id: GitHubInstallationId::new(42)
             }
         );
         assert_eq!(
             target.upstream_identity(),
             UpstreamIdentity::GitHubAppInstallation {
+                host: "github.com".to_owned(),
                 installation_id: GitHubInstallationId::new(42)
             }
         );
+    }
+
+    #[test]
+    fn installation_identity_includes_host_in_provider_and_session_views() {
+        let github = RoutingTarget::github_app_installation(
+            GitHubInstallationId::new(42),
+            GitHubAccountRef::new("github.com", "ExampleOrg"),
+        );
+        let enterprise = RoutingTarget::github_app_installation(
+            GitHubInstallationId::new(42),
+            GitHubAccountRef::new("ghe.example.com", "ExampleOrg"),
+        );
+
+        assert_ne!(github.credential_source(), enterprise.credential_source());
+        assert_ne!(github.upstream_identity(), enterprise.upstream_identity());
+        assert!(matches!(
+            enterprise.credential_source(),
+            CredentialSource::GitHubAppInstallation { host, .. }
+                if host == "ghe.example.com"
+        ));
     }
 }
